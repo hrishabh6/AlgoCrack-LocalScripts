@@ -110,6 +110,24 @@ LOKI_PORT="${LOKI_PORT:-3100}"
 GRAFANA_PORT="${GRAFANA_PORT:-3001}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
+# Playground is on for local dev by default (local-process sandbox — not hostile-code safe).
+# Opt out: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up
+# Production defaults in application.yml stay false; K8s verification gate unchanged.
+DEV_LOCAL_PLAYGROUND="${DEV_LOCAL_PLAYGROUND:-true}"
+
+if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
+  PLAYGROUND_API_ENABLED=true
+  PLAYGROUND_RUN_ENABLED=true
+  EXECUTION_PLAYGROUND_ENABLED=true
+  EXECUTION_PLAYGROUND_SANDBOX_BACKEND=local-process
+  NEXT_PUBLIC_PLAYGROUND_ENABLED=true
+else
+  PLAYGROUND_API_ENABLED=false
+  PLAYGROUND_RUN_ENABLED=false
+  EXECUTION_PLAYGROUND_ENABLED=false
+  NEXT_PUBLIC_PLAYGROUND_ENABLED=false
+  EXECUTION_PLAYGROUND_SANDBOX_BACKEND="${EXECUTION_PLAYGROUND_SANDBOX_BACKEND:-local-process}"
+fi
 
 is_google_oauth_placeholder() {
   case "${1:-}" in
@@ -161,6 +179,8 @@ export WORKER_COUNT EXECUTION_WORKER_QUEUE_CAPACITY EXECUTION_TIMEOUT_SECONDS
 export EXECUTION_POLL_TIMEOUT_SECONDS EXECUTION_MEMORY_SOFT_LIMIT_MB EXECUTION_COMPILATION_TIMEOUT_SECONDS
 export API_GATEWAY_PORT NEXT_PUBLIC_API_BASE_URL DEV_LOCAL_OBSERVABILITY PROMETHEUS_PORT LOKI_PORT GRAFANA_PORT
 export GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD
+export DEV_LOCAL_PLAYGROUND PLAYGROUND_API_ENABLED PLAYGROUND_RUN_ENABLED
+export EXECUTION_PLAYGROUND_ENABLED EXECUTION_PLAYGROUND_SANDBOX_BACKEND NEXT_PUBLIC_PLAYGROUND_ENABLED
 
 usage() {
   cat <<'EOF'
@@ -172,7 +192,14 @@ Usage:
   scripts/dev-local.sh logs [service]  Tail all logs or one service log
   scripts/dev-local.sh seed            Seed problem_db from k8s/all_databases_dump.sql when empty
   scripts/dev-local.sh bootstrap-potd  Curate POTD metadata, grant ADMIN, publish today (UTC)
+
   scripts/dev-local.sh observability   Generate/start local Prometheus, Loki, Alloy, and Grafana
+
+  Playground (local dev):
+  - Enabled by default on `up` (local-process CXE backend; trusted dev only — not a hostile-code sandbox).
+  - Sets PLAYGROUND_* / EXECUTION_PLAYGROUND_* / NEXT_PUBLIC_PLAYGROUND_ENABLED for the launcher.
+  - Disable: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up
+  - If playground-related env changed, `up` restarts submission-service, CXE, and frontend once.
 
 This runs the app like a traditional IDE setup: local MySQL/Redis must already be
 running, while each microservice and the Next.js app run as separate live dev
@@ -184,6 +211,8 @@ Environment:
   - Optional Google OAuth secrets: AlgoCrack-AuthService/.local.secrets.properties
   - Set DEV_LOCAL_SEED_PROBLEM_DATA=false to skip automatic Problem DB seeding.
   - Set DEV_LOCAL_OBSERVABILITY=false to skip local observability startup.
+  - Playground is enabled by default (local-process CXE; not hostile-code safe).
+    Set DEV_LOCAL_PLAYGROUND=false to disable API/run/UI for local processes.
 EOF
 }
 
@@ -658,6 +687,43 @@ stop_unmanaged_frontend() {
   fi
 }
 
+playground_local_env_stamp() {
+  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s backend=%s' \
+    "$DEV_LOCAL_PLAYGROUND" \
+    "$PLAYGROUND_API_ENABLED" \
+    "$PLAYGROUND_RUN_ENABLED" \
+    "$EXECUTION_PLAYGROUND_ENABLED" \
+    "$NEXT_PUBLIC_PLAYGROUND_ENABLED" \
+    "$EXECUTION_PLAYGROUND_SANDBOX_BACKEND"
+}
+
+write_playground_local_env_stamp() {
+  playground_local_env_stamp >"$PID_DIR/playground-local-env.stamp"
+}
+
+# Playground flags are read at process start (Spring @ConditionalOnProperty, Next.js env).
+restart_playground_dependent_services_if_needed() {
+  local stamp_file="$PID_DIR/playground-local-env.stamp"
+  local current
+  current="$(playground_local_env_stamp)"
+
+  if [[ -f "$stamp_file" ]] && [[ "$(cat "$stamp_file")" == "$current" ]]; then
+    return 0
+  fi
+
+  local name
+  for name in submission-service code-execution-engine frontend; do
+    if is_managed_process_running "$name"; then
+      if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
+        echo "Restarting $name for playground local config (local-process; not production sandbox)..."
+      else
+        echo "Restarting $name (playground disabled: DEV_LOCAL_PLAYGROUND=false)..."
+      fi
+      stop_bg "$name"
+    fi
+  done
+}
+
 stop_bg() {
   local name="$1"
   local pid_file="$PID_DIR/$name.pid"
@@ -683,6 +749,7 @@ up() {
   ensure_mysql_databases
   wait_for_redis
   seed_problem_data_if_empty
+  restart_playground_dependent_services_if_needed
 
   start_bg auth-service "$ROOT/AlgoCrack-AuthService" env \
     SERVER_PORT=7483 \
@@ -723,6 +790,8 @@ up() {
     EXECUTION_POLL_TIMEOUT_SECONDS="$EXECUTION_POLL_TIMEOUT_SECONDS" \
     EXECUTION_MEMORY_SOFT_LIMIT_MB="$EXECUTION_MEMORY_SOFT_LIMIT_MB" \
     EXECUTION_COMPILATION_TIMEOUT_SECONDS="$EXECUTION_COMPILATION_TIMEOUT_SECONDS" \
+    EXECUTION_PLAYGROUND_ENABLED="$EXECUTION_PLAYGROUND_ENABLED" \
+    EXECUTION_PLAYGROUND_SANDBOX_BACKEND="$EXECUTION_PLAYGROUND_SANDBOX_BACKEND" \
     ./gradlew bootRun
 
   start_bg submission-service "$ROOT/AlgoCrack-SubmissionService" env \
@@ -734,6 +803,8 @@ up() {
     SPRING_FLYWAY_CONNECT_RETRIES=10 \
     PROBLEM_SERVICE_URL=http://localhost:8084 \
     CXE_SERVICE_URL=http://localhost:8081 \
+    PLAYGROUND_API_ENABLED="$PLAYGROUND_API_ENABLED" \
+    PLAYGROUND_RUN_ENABLED="$PLAYGROUND_RUN_ENABLED" \
     ./gradlew bootRun
 
   start_bg api-gateway "$ROOT/AlgoCrack-APIGateway" env \
@@ -748,14 +819,18 @@ up() {
 
   start_bg frontend "$ROOT/frontend" env \
     NEXT_PUBLIC_API_BASE_URL="$NEXT_PUBLIC_API_BASE_URL" \
+    NEXT_PUBLIC_PLAYGROUND_ENABLED="$NEXT_PUBLIC_PLAYGROUND_ENABLED" \
     PORT=3000 \
     npm run dev
 
   start_observability
+  write_playground_local_env_stamp
 
   cat <<EOF
 
 Local dev is up.
+$( [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]] && printf '\nPlayground: ON (local-process; trusted dev only — not hostile-code safe).\n  http://localhost:3000/playground after sign-in.\n  Opt out: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up\n' )
+$( [[ "$DEV_LOCAL_PLAYGROUND" != "true" ]] && printf '\nPlayground: OFF (DEV_LOCAL_PLAYGROUND=false).\n' )
 
 Open:
   Frontend:      http://localhost:3000

@@ -33,3 +33,22 @@ cp .env.example .env
 
 The generated `.dev-logs/`, `.dev-pids/`, and `.dev-observability/` directories
 are machine-local runtime state and are intentionally ignored by Git.
+
+### Playground (local)
+
+Playground is **on by default** when you run `scripts/dev-local.sh up`. The
+launcher sets `PLAYGROUND_API_ENABLED`, `PLAYGROUND_RUN_ENABLED`,
+`EXECUTION_PLAYGROUND_ENABLED`, and `NEXT_PUBLIC_PLAYGROUND_ENABLED` to `true`
+and uses CXE sandbox backend `local-process` (trusted development only — not a
+production or hostile-code sandbox). Production `application.yml` defaults and
+the Kubernetes `production-verified` gate are unchanged.
+
+Opt out:
+
+```bash
+DEV_LOCAL_PLAYGROUND=false scripts/dev-local.sh up
+```
+
+If you change playground-related env while services are already running, `up`
+restarts submission-service, code-execution-engine, and frontend once so flags
+take effect (see `.dev-pids/playground-local-env.stamp`).
