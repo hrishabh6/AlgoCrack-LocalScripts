@@ -328,9 +328,14 @@ EOF
 
       if [[ -z "$NEXT_PUBLIC_API_BASE_URL_FROM_ENV" ]]; then
         NEXT_PUBLIC_API_BASE_URL="http://localhost:$API_GATEWAY_PORT"
+      elif [[ "${NEXT_PUBLIC_API_BASE_URL}" == "http://localhost:9090" ]]; then
+        NEXT_PUBLIC_API_BASE_URL="http://localhost:$API_GATEWAY_PORT"
+        echo "Updated NEXT_PUBLIC_API_BASE_URL to match API Gateway fallback port."
       fi
 
       if [[ -z "$GOOGLE_REDIRECT_URI_FROM_ENV" ]]; then
+        GOOGLE_REDIRECT_URI="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
+      elif [[ "${GOOGLE_REDIRECT_URI}" == "http://localhost:9090/api/v1/auth/login/oauth2/code/google" ]]; then
         GOOGLE_REDIRECT_URI="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
       fi
 
