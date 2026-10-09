@@ -114,6 +114,9 @@ GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
 # Opt out: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up
 # Production defaults in application.yml stay false; K8s verification gate unchanged.
 DEV_LOCAL_PLAYGROUND="${DEV_LOCAL_PLAYGROUND:-true}"
+# Complexity analysis is enabled locally as static analysis only. Dynamic profiling
+# remains off because it requires the production-style benchmark/profile services.
+DEV_LOCAL_COMPLEXITY="${DEV_LOCAL_COMPLEXITY:-true}"
 
 if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
   PLAYGROUND_API_ENABLED=true
@@ -127,6 +130,16 @@ else
   EXECUTION_PLAYGROUND_ENABLED=false
   NEXT_PUBLIC_PLAYGROUND_ENABLED=false
   EXECUTION_PLAYGROUND_SANDBOX_BACKEND="${EXECUTION_PLAYGROUND_SANDBOX_BACKEND:-local-process}"
+fi
+
+if [[ "$DEV_LOCAL_COMPLEXITY" == "true" ]]; then
+  COMPLEXITY_API_ENABLED=true
+  COMPLEXITY_STATIC_ANALYSIS_ENABLED=true
+  COMPLEXITY_DYNAMIC_PROFILING_ENABLED=false
+else
+  COMPLEXITY_API_ENABLED=false
+  COMPLEXITY_STATIC_ANALYSIS_ENABLED=false
+  COMPLEXITY_DYNAMIC_PROFILING_ENABLED=false
 fi
 
 is_google_oauth_placeholder() {
@@ -181,6 +194,8 @@ export API_GATEWAY_PORT NEXT_PUBLIC_API_BASE_URL DEV_LOCAL_OBSERVABILITY PROMETH
 export GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD
 export DEV_LOCAL_PLAYGROUND PLAYGROUND_API_ENABLED PLAYGROUND_RUN_ENABLED
 export EXECUTION_PLAYGROUND_ENABLED EXECUTION_PLAYGROUND_SANDBOX_BACKEND NEXT_PUBLIC_PLAYGROUND_ENABLED
+export DEV_LOCAL_COMPLEXITY COMPLEXITY_API_ENABLED COMPLEXITY_STATIC_ANALYSIS_ENABLED
+export COMPLEXITY_DYNAMIC_PROFILING_ENABLED
 
 usage() {
   cat <<'EOF'
@@ -213,6 +228,8 @@ Environment:
   - Set DEV_LOCAL_OBSERVABILITY=false to skip local observability startup.
   - Playground is enabled by default (local-process CXE; not hostile-code safe).
     Set DEV_LOCAL_PLAYGROUND=false to disable API/run/UI for local processes.
+  - Complexity analysis is enabled by default as static analysis only.
+    Set DEV_LOCAL_COMPLEXITY=false to disable its API and worker locally.
 EOF
 }
 
@@ -693,13 +710,17 @@ stop_unmanaged_frontend() {
 }
 
 playground_local_env_stamp() {
-  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s backend=%s' \
+  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s' \
     "$DEV_LOCAL_PLAYGROUND" \
     "$PLAYGROUND_API_ENABLED" \
     "$PLAYGROUND_RUN_ENABLED" \
     "$EXECUTION_PLAYGROUND_ENABLED" \
     "$NEXT_PUBLIC_PLAYGROUND_ENABLED" \
-    "$EXECUTION_PLAYGROUND_SANDBOX_BACKEND"
+    "$EXECUTION_PLAYGROUND_SANDBOX_BACKEND" \
+    "$DEV_LOCAL_COMPLEXITY" \
+    "$COMPLEXITY_API_ENABLED" \
+    "$COMPLEXITY_STATIC_ANALYSIS_ENABLED" \
+    "$COMPLEXITY_DYNAMIC_PROFILING_ENABLED"
 }
 
 write_playground_local_env_stamp() {
@@ -756,6 +777,8 @@ up() {
   seed_problem_data_if_empty
   restart_playground_dependent_services_if_needed
 
+  # A reused Gradle daemon retains its original environment. Use a fresh process so
+  # each bootRun receives the current local service and feature-flag configuration.
   start_bg auth-service "$ROOT/AlgoCrack-AuthService" env \
     SERVER_PORT=7483 \
     SPRING_DATASOURCE_URL=jdbc:mysql://"$MYSQL_HOST":"$MYSQL_PORT"/auth_db \
@@ -768,7 +791,7 @@ up() {
     GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
     GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
     GOOGLE_REDIRECT_URI="$GOOGLE_REDIRECT_URI" \
-    ./gradlew bootRun
+    ./gradlew --no-daemon bootRun
 
   start_bg problem-service "$ROOT/AlgoCrack-ProblemService" env \
     SERVER_PORT=8084 \
@@ -779,7 +802,7 @@ up() {
     SPRING_FLYWAY_CONNECT_RETRIES=10 \
     AUTH_SERVICE_BASE_URL=http://localhost:7483 \
     SUBMISSION_SERVICE_URL=http://localhost:8080 \
-    ./gradlew bootRun
+    ./gradlew --no-daemon bootRun
 
   start_bg code-execution-engine "$ROOT/CodeExecutionEngine" env \
     SERVER_PORT=8081 \
@@ -797,7 +820,7 @@ up() {
     EXECUTION_COMPILATION_TIMEOUT_SECONDS="$EXECUTION_COMPILATION_TIMEOUT_SECONDS" \
     EXECUTION_PLAYGROUND_ENABLED="$EXECUTION_PLAYGROUND_ENABLED" \
     EXECUTION_PLAYGROUND_SANDBOX_BACKEND="$EXECUTION_PLAYGROUND_SANDBOX_BACKEND" \
-    ./gradlew bootRun
+    ./gradlew --no-daemon bootRun
 
   start_bg submission-service "$ROOT/AlgoCrack-SubmissionService" env \
     SERVER_PORT=8080 \
@@ -810,7 +833,10 @@ up() {
     CXE_SERVICE_URL=http://localhost:8081 \
     PLAYGROUND_API_ENABLED="$PLAYGROUND_API_ENABLED" \
     PLAYGROUND_RUN_ENABLED="$PLAYGROUND_RUN_ENABLED" \
-    ./gradlew bootRun
+    COMPLEXITY_API_ENABLED="$COMPLEXITY_API_ENABLED" \
+    COMPLEXITY_STATIC_ANALYSIS_ENABLED="$COMPLEXITY_STATIC_ANALYSIS_ENABLED" \
+    COMPLEXITY_DYNAMIC_PROFILING_ENABLED="$COMPLEXITY_DYNAMIC_PROFILING_ENABLED" \
+    ./gradlew --no-daemon bootRun
 
   start_bg api-gateway "$ROOT/AlgoCrack-APIGateway" env \
     SERVER_PORT="$API_GATEWAY_PORT" \
@@ -818,7 +844,7 @@ up() {
     PROBLEM_SERVICE_URL=http://localhost:8084 \
     SUBMISSION_SERVICE_URL=http://localhost:8080 \
     JWT_PUBLIC_KEY_PATH=classpath:keys/public.pem \
-    ./gradlew bootRun
+    ./gradlew --no-daemon bootRun
 
   stop_unmanaged_frontend
 
@@ -836,6 +862,8 @@ up() {
 Local dev is up.
 $( [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]] && printf '\nPlayground: ON (local-process; trusted dev only — not hostile-code safe).\n  http://localhost:3000/playground after sign-in.\n  Opt out: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up\n' )
 $( [[ "$DEV_LOCAL_PLAYGROUND" != "true" ]] && printf '\nPlayground: OFF (DEV_LOCAL_PLAYGROUND=false).\n' )
+$( [[ "$DEV_LOCAL_COMPLEXITY" == "true" ]] && printf '\nComplexity analysis: ON (static analysis only; dynamic profiling is disabled locally).\n' )
+$( [[ "$DEV_LOCAL_COMPLEXITY" != "true" ]] && printf '\nComplexity analysis: OFF (DEV_LOCAL_COMPLEXITY=false).\n' )
 
 Open:
   Frontend:      http://localhost:3000
