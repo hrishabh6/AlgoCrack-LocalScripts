@@ -2,7 +2,13 @@
 
 set -u
 
-ROOT="${1:-$(pwd)}"
+# Script lives in <project-root>/scripts/.
+# Resolve the project root automatically, regardless of current directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+# Optional argument can override the detected project root.
+ROOT="${1:-$DEFAULT_ROOT}"
 
 echo "Scanning Git repositories under:"
 echo "  $ROOT"
@@ -32,7 +38,7 @@ while IFS= read -r -d '' gitdir; do
         continue
     fi
 
-    # This project convention uses main.
+    # AlgoCrack repositories use main as the primary branch.
     if ! git show-ref --verify --quiet refs/heads/main; then
         echo "SKIP: no local 'main' branch."
         echo
@@ -52,6 +58,7 @@ while IFS= read -r -d '' gitdir; do
     fi
 
     echo "Pruning stale remote-tracking references..."
+
     git fetch --prune >/dev/null 2>&1 || \
         echo "WARNING: fetch --prune failed; continuing with local data."
 
@@ -77,7 +84,7 @@ while IFS= read -r -d '' gitdir; do
     while IFS= read -r branch; do
         [ -z "$branch" ] && continue
 
-        # Safe delete only. Git refuses if it considers the branch unmerged.
+        # Safe delete only. Git refuses if the branch is not merged.
         if git branch -d "$branch"; then
             :
         else

@@ -66,3 +66,12 @@ DEV_LOCAL_PLAYGROUND=false scripts/dev-local.sh up
 If you change playground-related env while services are already running, `up`
 restarts submission-service, code-execution-engine, and frontend once so flags
 take effect (see `.dev-pids/playground-local-env.stamp`).
+
+
+### Clean Up Merged Git Branches
+
+Use `cleanup-merged-branches.sh` to safely remove local branches that have already been merged into `main` across AlgoCrack repositories.
+
+```bash
+chmod +x cleanup-merged-branches.sh
+./cleanup-merged-branches.sh
