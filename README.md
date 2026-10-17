@@ -18,6 +18,20 @@ scripts/dev-local.sh bootstrap-potd
 
 Verify: `curl -s http://localhost:9090/api/v1/daily-challenges/today`
 
+### Google OAuth and a busy port 9090
+
+Google OAuth callback URIs are exact. `dev-local.sh` normally uses port 9090,
+but can choose a free fallback for non-OAuth local use. With real Google OAuth
+credentials, it now stops before startup if the selected gateway port and
+`GOOGLE_REDIRECT_URI` differ; silently switching the callback would cause
+Google's `redirect_uri_mismatch` error.
+
+Either free port 9090 and keep
+`http://localhost:9090/api/v1/auth/login/oauth2/code/google`, or add the exact
+fallback callback in Google Cloud Console's **Authorized redirect URIs** and
+set matching `API_GATEWAY_PORT`, `NEXT_PUBLIC_API_BASE_URL`, and
+`GOOGLE_REDIRECT_URI` values in `.env`.
+
 `dev-local.sh` expects MySQL and Redis to already be running locally. It starts
 each microservice and the frontend as separate live dev processes for an
 IDE-style local workflow. It also generates local Prometheus/Loki/Alloy/Grafana

@@ -350,10 +350,16 @@ EOF
         echo "Updated NEXT_PUBLIC_API_BASE_URL to match API Gateway fallback port."
       fi
 
+      # OAuth redirect URIs are an exact Google allow-list. A placeholder local
+      # credential may follow the gateway fallback, but a configured OAuth
+      # client must be checked explicitly below instead of silently changing
+      # its registered callback URI.
       if [[ -z "$GOOGLE_REDIRECT_URI_FROM_ENV" ]]; then
         GOOGLE_REDIRECT_URI="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
       elif [[ "${GOOGLE_REDIRECT_URI}" == "http://localhost:9090/api/v1/auth/login/oauth2/code/google" ]]; then
-        GOOGLE_REDIRECT_URI="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
+        if is_google_oauth_placeholder "$GOOGLE_CLIENT_ID" || is_google_oauth_placeholder "$GOOGLE_CLIENT_SECRET"; then
+          GOOGLE_REDIRECT_URI="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
+        fi
       fi
 
       export API_GATEWAY_PORT NEXT_PUBLIC_API_BASE_URL GOOGLE_REDIRECT_URI
@@ -362,6 +368,40 @@ EOF
   done
 
   echo "API Gateway port $API_GATEWAY_PORT is busy and no fallback port is free." >&2
+  return 1
+}
+
+validate_google_oauth_gateway_callback() {
+  local expected_callback="http://localhost:$API_GATEWAY_PORT/api/v1/auth/login/oauth2/code/google"
+
+  if is_google_oauth_placeholder "$GOOGLE_CLIENT_ID" || is_google_oauth_placeholder "$GOOGLE_CLIENT_SECRET"; then
+    return 0
+  fi
+
+  if [[ "$GOOGLE_REDIRECT_URI" == "$expected_callback" ]]; then
+    return 0
+  fi
+
+  cat >&2 <<EOF
+Google OAuth cannot use the automatic API Gateway port fallback.
+
+The gateway selected port $API_GATEWAY_PORT, but GOOGLE_REDIRECT_URI is:
+  $GOOGLE_REDIRECT_URI
+
+Google requires the callback URI in an authorization request to exactly match
+an Authorized redirect URI on the configured OAuth client. Start the stack
+only after choosing one of these matching configurations:
+  1. Free port 9090 and use the existing callback:
+     http://localhost:9090/api/v1/auth/login/oauth2/code/google
+  2. Register this callback in Google Cloud Console, then set all three values
+     in .env before starting:
+     API_GATEWAY_PORT=$API_GATEWAY_PORT
+     NEXT_PUBLIC_API_BASE_URL=http://localhost:$API_GATEWAY_PORT
+     GOOGLE_REDIRECT_URI=$expected_callback
+
+The launcher stopped before starting application services to avoid a
+redirect_uri_mismatch login flow.
+EOF
   return 1
 }
 
@@ -769,6 +809,7 @@ stop_bg() {
 up() {
   check_prerequisites
   select_api_gateway_port
+  validate_google_oauth_gateway_callback
 
   echo "Checking local infra..."
   wait_for_mysql
