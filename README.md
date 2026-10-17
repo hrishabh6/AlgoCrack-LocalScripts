@@ -75,3 +75,30 @@ Use `cleanup-merged-branches.sh` to safely remove local branches that have alrea
 ```bash
 chmod +x cleanup-merged-branches.sh
 ./cleanup-merged-branches.sh
+
+### Docker RC Image Build & Push
+
+Use `scripts/release-images.sh` to build and publish all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) to Docker Hub.
+
+**Prerequisites:** Docker, Buildx, Git, curl, and Docker Hub authentication.
+
+```bash
+# Authenticate with Docker Hub
+docker login -u hrishabhjoshi
+
+# Preview builds without publishing
+./scripts/release-images.sh v1.0.0-rc.2 --dry-run
+
+# Build and push all images
+./scripts/release-images.sh v1.0.0-rc.2
+```
+
+**Script features:**
+- Validates clean Git repositories on `main`.
+- Builds images sequentially for `linux/amd64`.
+- Refuses to overwrite existing Docker Hub tags.
+- Verifies pushed image digests.
+- Generates a release manifest at `release-manifests/<tag>/images.tsv`.
+- Does not modify Git branches or deploy Kubernetes.
+
+**Note:** Always use a new RC tag for subsequent releases or failed publishing retries. Use `--yes` to skip interactive confirmation.
