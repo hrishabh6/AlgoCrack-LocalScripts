@@ -121,6 +121,66 @@ def discover_fragments(root: Path, baseline_ids: set[str]) -> dict[str, str]:
     return rules
 
 
+
+# The generator accepts only literal, application-scoped request paths and named
+# request variables. It cannot create global CRS disable directives.
+API_PATH = re.compile(r"^/api/v1/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$")
+TARGET = re.compile(r"^(?:ARGS|REQUEST_COOKIES|REQUEST_HEADERS):[A-Za-z0-9_.-]+$")
+CRS_ID = re.compile(r"^9[0-9]{5}$")
+METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+PROTECTED_CRS_PREFIXES = ("900", "901", "949", "959", "980")
+
+
+def generate_fragment(rule_id: str, crs_id: str, method_arg: str,
+                      path_args: list[str], target: str, reason: str = "") -> str:
+    """Create a narrowly scoped, pre-CRS ModSecurity exclusion from safe literals."""
+    if not SAFE_ID.fullmatch(rule_id):
+        raise RuleError("--add must be a 5-10 digit positive numeric custom ID")
+    if not CRS_ID.fullmatch(crs_id) or crs_id.startswith(PROTECTED_CRS_PREFIXES):
+        raise RuleError("--crs-rule must be a valid 6-digit CRS detection rule, not a setup/anomaly/reporting rule")
+    if not TARGET.fullmatch(target):
+        raise RuleError("--target must name ONE field, e.g. ARGS:json.code or REQUEST_COOKIES:redirect_uri")
+    methods = [part.strip().upper() for part in method_arg.split(",")]
+    if not methods or len(methods) != len(set(methods)) or any(m not in METHODS for m in methods):
+        raise RuleError("--method requires unique comma-separated HTTP verbs: GET,POST,PUT,PATCH,DELETE")
+    if not path_args:
+        raise RuleError("--paths is required")
+    paths = [part.strip() for group in path_args for part in group.split(",")]
+    if not paths or len(paths) > 20 or len(paths) != len(set(paths)):
+        raise RuleError("Provide 1-20 unique literal paths")
+    if any(not API_PATH.fullmatch(p) for p in paths):
+        raise RuleError("Paths must be literal /api/v1/... routes without wildcards, queries or trailing slashes")
+    if len(reason) > 160 or "\n" in reason or "\r" in reason:
+        raise RuleError("--reason must be a single line of at most 160 characters")
+    safe_reason = re.sub(r"[^A-Za-z0-9 .,;:_/()-]", "", reason).strip()
+    method_rx = "^(?:" + "|".join(methods) + ")$"
+    path_rx = "^(?:" + "|".join(re.escape(path) for path in paths) + ")/?$"
+    description = f"# Reviewed AlgoCrack exclusion {rule_id}: CRS {crs_id} on {target}.\n"
+    if safe_reason:
+        description += f"# Reason: {safe_reason}\n"
+    return (description
+            + f'SecRule REQUEST_METHOD "@rx {method_rx}" \\\n'
+            + f'    "id:{rule_id},phase:1,pass,nolog,t:none,chain"\n'
+            + f'    SecRule REQUEST_FILENAME "@rx {path_rx}" \\\n'
+            + f'        "t:none,ctl:ruleRemoveTargetById={crs_id};{target}"\n')
+
+
+def register_fragment(path: Path, contents: str) -> bool:
+    """Write a new, reviewed rule without ever overwriting an existing ID."""
+    if path.exists():
+        if path.is_file() and path.read_text(encoding="utf-8") == contents:
+            return False
+        raise RuleError(f"Rule ID already exists with different content; refusing overwrite: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as output:
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+    except FileExistsError as exc:
+        raise RuleError(f"Concurrent creation of {path}; no overwrite attempted") from exc
+    return True
+
 def state_file(root: Path) -> Path:
     return root / "docker/waf/exclusions/enabled.json"
 
@@ -342,8 +402,16 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--status", action="store_true", help="Compare local desired file and running WAF (read-only)")
     mode.add_argument("--disable", action="store_true", help="Disable listed fragment IDs (baseline cannot be disabled)")
     mode.add_argument("--validate", action="store_true", help="Validate currently enabled configuration without deploying")
+    mode.add_argument("--add", metavar="NEW_ID", help="Create, register and apply a new scoped exclusion")
     parser.add_argument("ids", nargs="*", metavar="ID", help="One or more approved AlgoCrack exclusion IDs")
     parser.add_argument("--all", action="store_true", help="Enable all reviewed fragment files")
+    parser.add_argument("--crs-rule", help="CRS detection rule ID for --add, e.g. 932130")
+    parser.add_argument("--method", help="HTTP method(s) for --add, e.g. POST or POST,PUT")
+    parser.add_argument("--paths", action="append", help="Literal API paths for --add, comma-separated; repeatable")
+    parser.add_argument("--target", help="Exact matched variable for --add, e.g. ARGS:json.code")
+    parser.add_argument("--reason", default="", help="Short audit justification for --add")
+    parser.add_argument("--apply", action="store_true", help="Explicit apply flag (new --add rules deploy by default)")
+    parser.add_argument("--register-only", action="store_true", help="With --add: validate and save fragment without enabling/deploying")
     parser.add_argument("--dry-run", action="store_true", help="Plan and validate, never modify local files or Kubernetes")
     parser.add_argument("--offline", action="store_true", help="With --dry-run/--validate, skip Kubernetes context and release checks")
     parser.add_argument("--force", action="store_true", help="Upgrade/restart even when there is no detectable change")
@@ -377,24 +445,60 @@ def main() -> int:
             raise RuleError(f"Smoke script must exist and be executable: {args.smoke_script}")
     if not args.list and not args.chart.is_dir():
         raise RuleError(f"Missing Helm chart at {args.chart}; copy scripts/ into your AlgoCrack repository")
-    if args.offline and not (args.dry_run or args.validate):
-        raise RuleError("--offline is allowed only with --dry-run or --validate")
+    if args.offline and not (args.dry_run or args.validate or args.register_only):
+        raise RuleError("--offline is allowed only with --dry-run, --validate or --register-only")
+    if args.register_only and not args.add:
+        raise RuleError("--register-only requires --add")
+    if args.register_only and (args.apply or args.dry_run):
+        raise RuleError("--register-only cannot be combined with --apply or --dry-run")
+    if args.apply and not args.add:
+        raise RuleError("--apply is meaningful only with --add; positional IDs apply by default")
+    if args.apply and args.dry_run:
+        raise RuleError("--apply and --dry-run are mutually exclusive")
+    supplied = (args.crs_rule, args.method, args.paths, args.target)
+    if args.add and any(x is None for x in supplied):
+        raise RuleError("--add requires --crs-rule, --method, --paths and --target")
+    if not args.add and (any(x is not None for x in supplied) or args.reason):
+        raise RuleError("Rule creation options require --add NEW_ID")
+    if args.add and (args.all or args.disable or args.list or args.status or args.validate):
+        raise RuleError("--add cannot be combined with --all, --disable, --list, --status or --validate")
+    if args.register_only:
+        args.offline = True
     if args.disable and not args.ids:
         raise RuleError("--disable requires one or more IDs")
     if args.all and (args.ids or args.disable or args.list or args.status):
         raise RuleError("--all cannot be combined with IDs, --disable, --list or --status")
     if (args.list or args.status or args.validate) and args.ids:
         raise RuleError("This mode does not accept positional IDs")
-    if not args.list and not args.status and not args.validate and not args.ids and not args.all:
+    if not args.list and not args.status and not args.validate and not args.ids and not args.all and not args.add:
         raise RuleError("Supply custom rule IDs, --all, --list, --status or --validate")
     if any(not SAFE_ID.fullmatch(id_) for id_ in args.ids):
         raise RuleError("Rule IDs must be 5–10 digit positive numeric IDs")
     if len(args.ids) != len(set(args.ids)):
         raise RuleError("Duplicate positional ID")
+    if args.add and args.add in args.ids:
+        raise RuleError("Do not repeat --add NEW_ID as a positional ID")
 
     baseline, baseline_ids = read_baseline(args.root)
     fragments = discover_fragments(args.root, baseline_ids)
     enabled = load_enabled(args.root, set(fragments))
+    new_fragment_text = None
+    new_fragment_path = None
+    fragment_is_new = False
+    if args.add:
+        if args.add in baseline_ids:
+            raise RuleError(f"ID {args.add} already exists in always-on baseline; choose a new custom ID")
+        new_fragment_text = generate_fragment(args.add, args.crs_rule, args.method,
+                                              args.paths, args.target, args.reason)
+        new_fragment_path = args.root / "docker/waf/exclusions" / f"{args.add}.conf"
+        if args.add in fragments:
+            if fragments[args.add] != new_fragment_text:
+                raise RuleError(f"ID {args.add} already has a different registered rule; refusing overwrite")
+            note(f"Rule {args.add} already registered identically; reapplying idempotently.")
+        else:
+            fragment_is_new = True
+            fragments[args.add] = new_fragment_text
+            note(f"Staged new exclusion {args.add}: CRS {args.crs_rule}, target {args.target}.")
     if args.list:
         show_list(baseline_ids, fragments, enabled)
         return 0
@@ -414,6 +518,10 @@ def main() -> int:
     if unknown:
         raise RuleError(f"Unknown IDs: {', '.join(sorted(unknown))}. Put reviewed rules in docker/waf/exclusions/<ID>.conf")
     next_enabled = set(enabled)
+    if args.add:
+        # Register-only validates the new fragment against the real WAF image,
+        # without committing the fragment to enabled.json or deploying it.
+        next_enabled.add(args.add)
     if args.disable:
         forbidden = set(args.ids) & baseline_ids
         if forbidden:
@@ -468,7 +576,16 @@ def main() -> int:
             chart_copy = args.chart / "files/waf" / RULE_NAME
             local_sync = not chart_copy.is_file() or chart_copy.read_bytes() != candidate
             state_sync = enabled != next_enabled
+            if args.register_only:
+                created = register_fragment(new_fragment_path, new_fragment_text)
+                note(f"REGISTERED: {new_fragment_path}" if created else
+                     f"ALREADY REGISTERED: {new_fragment_path}")
+                note("Not enabled or deployed. Run apply-secrules.sh " + args.add + " to deploy later.")
+                return 0
+
             if args.dry_run:
+                if fragment_is_new:
+                    note(f"Planned: create docker/waf/exclusions/{args.add}.conf (not written).")
                 if args.smoke_script:
                     note("NOTE: Application smoke script is not executed during --dry-run.")
                 note("DRY RUN: No repository files or Kubernetes resources were changed.")
@@ -482,6 +599,9 @@ def main() -> int:
                 note("WARNING: Could not read live WAF rules; will verify after upgrade.")
             if not manifest_changed and runtime_equal and not args.force:
                 note("No Helm/WAF changes required. Synchronizing local chart copy if necessary.")
+                if fragment_is_new:
+                    register_fragment(new_fragment_path, new_fragment_text)
+                    note(f"Registered new rule: {new_fragment_path}")
                 if local_sync:
                     atomic_write(chart_copy, candidate)
                 if state_sync:
@@ -510,6 +630,9 @@ def main() -> int:
                     rollback(args, previous_revision)
                 raise
 
+            if fragment_is_new:
+                register_fragment(new_fragment_path, new_fragment_text)
+                note(f"Registered new rule: {new_fragment_path}")
             if local_sync:
                 atomic_write(chart_copy, candidate)
             if state_sync:
