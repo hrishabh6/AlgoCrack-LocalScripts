@@ -78,7 +78,7 @@ chmod +x cleanup-merged-branches.sh
 
 ### Docker RC Image Build & Push
 
-Use `scripts/release-images.sh` to build and publish all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) to Docker Hub.
+Use `scripts/release-images.sh` to build, push, resume, and verify all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) on Docker Hub.
 
 **Prerequisites:** Docker, Buildx, Git, curl, and Docker Hub authentication.
 
@@ -89,16 +89,30 @@ docker login -u hrishabhjoshi
 # Preview builds without publishing
 ./scripts/release-images.sh v1.0.0-rc.2 --dry-run
 
-# Build and push all images
+# Build, push, and verify all images
 ./scripts/release-images.sh v1.0.0-rc.2
+
+# Resume an interrupted release (skip already-published images)
+./scripts/release-images.sh v1.0.0-rc.2 --resume
+
+# Resume and push without immediate digest verification
+./scripts/release-images.sh v1.0.0-rc.2 --resume --skip-verification
+
+# Verify all seven published images separately
+./scripts/release-images.sh v1.0.0-rc.2 --verify
+
+# Skip interactive confirmation
+./scripts/release-images.sh v1.0.0-rc.2 --yes
 ```
 
 **Script features:**
 - Validates clean Git repositories on `main`.
 - Builds images sequentially for `linux/amd64`.
-- Refuses to overwrite existing Docker Hub tags.
-- Verifies pushed image digests.
+- Prevents overwriting existing Docker Hub tags.
+- Supports resuming partially completed releases using `--resume`.
+- Supports publishing without immediate verification using `--skip-verification`.
+- Verifies all published images using `--verify`, without rebuilding.
 - Generates a release manifest at `release-manifests/<tag>/images.tsv`.
 - Does not modify Git branches or deploy Kubernetes.
 
-**Note:** Always use a new RC tag for subsequent releases or failed publishing retries. Use `--yes` to skip interactive confirmation.
+**Note:** Use `--resume` if publishing was interrupted. Use a new RC tag when rebuilding or changing images; never overwrite an existing published RC. If verification is skipped, run `--verify` before Kubernetes deployment.
