@@ -1,5 +1,11 @@
-experiments
-!experiments/
-!experiments/nsjail/
-!experiments/nsjail/**
+# Machine-local binaries, libraries, workspaces, and runner secrets.
 .local/
+
+# Generated validation and diagnostic output. Reusable fixtures and manifests
+# under experiments/ remain tracked.
+reports/
+*.log
+
+# Python tooling caches.
+__pycache__/
+*.py[cod]
