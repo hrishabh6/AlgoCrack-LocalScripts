@@ -68,6 +68,30 @@ restarts submission-service, code-execution-engine, and frontend once so flags
 take effect (see `.dev-pids/playground-local-env.stamp`).
 
 
+### CXE NsJail prerequisites (Phase 1)
+
+Read-only gate and Minikube seccomp provisioning for the persistent NsJail runner path. Does **not** change `dev-local.sh` routing or Helm releases.
+
+```bash
+# Native gate (never enables local-process fallback)
+scripts/check-nsjail-prerequisites.sh
+
+# Build NsJail 3.6 + spike image; extract host binary to scripts/.local/
+scripts/nsjail/build-nsjail-from-docker.sh
+
+# Native fixture matrix (JDK 21)
+scripts/nsjail/run-native-validation.sh
+
+# Minikube Localhost seccomp (after minikube start)
+scripts/install-minikube-nsjail-seccomp.sh
+scripts/verify-minikube-nsjail-seccomp.sh
+scripts/nsjail/run-minikube-validation.sh
+```
+
+Re-run install/verify after every Minikube delete/recreate or node replacement. Canary Pod manifest: `experiments/nsjail/pod-localhost-seccomp.yaml` (disposable namespace `algocrack-nsjail-spike`).
+
+See `context/phase1/PHASE1_STATUS.md` and `scripts/nsjail/README.md`.
+
 ### Clean Up Merged Git Branches
 
 Use `cleanup-merged-branches.sh` to safely remove local branches that have already been merged into `main` across AlgoCrack repositories.
