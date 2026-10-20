@@ -988,7 +988,7 @@ case "$command" in
   bootstrap-potd)
     wait_for_mysql
     ensure_mysql_databases
-    bash "$ROOT/scripts/bootstrap-potd-local.sh"
+    bash "$ROOT/scripts/development/bootstrap-potd-local.sh"
     ;;
   *) usage ;;
 esac

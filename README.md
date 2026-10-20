@@ -1,4 +1,21 @@
-# Local Development
+# AlgoCrack scripts
+
+Scripts are grouped by operational purpose:
+
+- `dev-local.sh` — stable primary entrypoint for the native development stack.
+- `development/` — local bootstrap helpers called by `dev-local.sh`.
+- `deployment/` — release-image and WAF deployment tooling.
+- `maintenance/` — repository cleanup and code-inventory utilities.
+- `verification/` — focused, non-production validation entrypoints.
+- `nsjail/` — NsJail prerequisite, setup, and validation tooling.
+- `experiments/` — reusable experiment fixtures and manifests.
+
+Previously documented root command paths remain executable compatibility
+wrappers. New documentation uses the purpose-based canonical paths. Generated
+runtime files belong in `.local/` or `reports/` and are ignored; reusable
+scripts, fixtures, and manifests remain tracked.
+
+## Local development
 
 ```bash
 scripts/dev-local.sh up
@@ -74,7 +91,7 @@ Read-only gate and Minikube seccomp provisioning for the persistent NsJail runne
 
 ```bash
 # Native gate (never enables local-process fallback)
-scripts/check-nsjail-prerequisites.sh
+scripts/nsjail/check-prerequisites.sh
 
 # Build NsJail 3.6 + spike image; extract host binary to scripts/.local/
 scripts/nsjail/build-nsjail-from-docker.sh
@@ -83,8 +100,8 @@ scripts/nsjail/build-nsjail-from-docker.sh
 scripts/nsjail/run-native-validation.sh
 
 # Minikube Localhost seccomp (after minikube start)
-scripts/install-minikube-nsjail-seccomp.sh
-scripts/verify-minikube-nsjail-seccomp.sh
+scripts/nsjail/install-minikube-seccomp.sh
+scripts/nsjail/verify-minikube-seccomp.sh
 scripts/nsjail/run-minikube-validation.sh
 ```
 
@@ -92,17 +109,21 @@ Re-run install/verify after every Minikube delete/recreate or node replacement. 
 
 See `context/phase1/PHASE1_STATUS.md` and `scripts/nsjail/README.md`.
 
-### Clean Up Merged Git Branches
+### Repository maintenance
 
-Use `cleanup-merged-branches.sh` to safely remove local branches that have already been merged into `main` across AlgoCrack repositories.
+Use the maintenance scripts to inspect code volume or safely remove local
+branches that have already been merged into `main` across AlgoCrack
+repositories.
 
 ```bash
-chmod +x cleanup-merged-branches.sh
-./cleanup-merged-branches.sh
+scripts/maintenance/cloc.sh
+scripts/maintenance/cloc_full.sh
+scripts/maintenance/cleanup-merged-branches.sh
+```
 
 ### Docker RC Image Build & Push
 
-Use `scripts/release-images.sh` to build, push, resume, and verify all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) on Docker Hub.
+Use `scripts/deployment/release-images.sh` to build, push, resume, and verify all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) on Docker Hub.
 
 **Prerequisites:** Docker, Buildx, Git, curl, and Docker Hub authentication.
 
@@ -111,22 +132,22 @@ Use `scripts/release-images.sh` to build, push, resume, and verify all seven Alg
 docker login -u hrishabhjoshi
 
 # Preview builds without publishing
-./scripts/release-images.sh v1.0.0-rc.2 --dry-run
+./scripts/deployment/release-images.sh v1.0.0-rc.2 --dry-run
 
 # Build, push, and verify all images
-./scripts/release-images.sh v1.0.0-rc.2
+./scripts/deployment/release-images.sh v1.0.0-rc.2
 
 # Resume an interrupted release (skip already-published images)
-./scripts/release-images.sh v1.0.0-rc.2 --resume
+./scripts/deployment/release-images.sh v1.0.0-rc.2 --resume
 
 # Resume and push without immediate digest verification
-./scripts/release-images.sh v1.0.0-rc.2 --resume --skip-verification
+./scripts/deployment/release-images.sh v1.0.0-rc.2 --resume --skip-verification
 
 # Verify all seven published images separately
-./scripts/release-images.sh v1.0.0-rc.2 --verify
+./scripts/deployment/release-images.sh v1.0.0-rc.2 --verify
 
 # Skip interactive confirmation
-./scripts/release-images.sh v1.0.0-rc.2 --yes
+./scripts/deployment/release-images.sh v1.0.0-rc.2 --yes
 ```
 
 **Script features:**
@@ -140,3 +161,13 @@ docker login -u hrishabhjoshi
 - Does not modify Git branches or deploy Kubernetes.
 
 **Note:** Use `--resume` if publishing was interrupted. Use a new RC tag when rebuilding or changing images; never overwrite an existing published RC. If verification is skipped, run `--verify` before Kubernetes deployment.
+
+### WAF and Kubernetes verification
+
+```bash
+# Manage scoped WAF exclusions.
+scripts/deployment/apply-secrules.sh --help
+
+# Validate generated Java compilation in an explicitly supplied CXE image.
+scripts/verification/validate-java-k8s-compilation.sh <image>
+```

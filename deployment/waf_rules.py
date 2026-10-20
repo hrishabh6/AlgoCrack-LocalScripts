@@ -419,7 +419,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-nonlocal-context", action="store_true", help="Allow deployment to a context/namespace other than local Minikube")
     parser.add_argument("--docker-check", choices=["auto", "require", "skip"], default="auto", help="NGINX syntax preflight using locally cached WAF image")
     parser.add_argument("--smoke-script", type=Path, help="Optional executable application smoke-test after deploy; nonzero exit triggers rollback")
-    parser.add_argument("--repo-root", type=Path, help="Override repository root (default parent of scripts/)")
+    parser.add_argument("--repo-root", type=Path, help="Override repository root (default workspace containing scripts/)")
     parser.add_argument("--chart", type=Path, help="Override Helm chart directory")
     parser.add_argument("-f", "--values", type=Path, action="append", help="Helm values YAML; repeatable (default RC2 local-prod-sim overlay)")
     parser.add_argument("-n", "--namespace", default="algocrack")
@@ -436,9 +436,12 @@ def main() -> int:
     dns_name = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
     if not dns_name.fullmatch(args.namespace) or not dns_name.fullmatch(args.release):
         raise RuleError("--namespace and --release must be valid lowercase Kubernetes DNS names")
-    args.root = (args.repo_root or Path(__file__).resolve().parent.parent).resolve()
+    args.root = (args.repo_root or Path(__file__).resolve().parents[2]).resolve()
     args.chart = (args.chart or (args.root / "helm/algocrack")).resolve()
-    args.values = [x.resolve() for x in (args.values or [args.root / "helm/algocrack/values.local-prod-sim-rc2.yaml"])]
+    args.values = [x.resolve() for x in (
+        args.values
+        or [args.root / "helm/algocrack/overlays/releases/values.local-prod-sim-rc2.yaml"]
+    )]
     if args.smoke_script:
         args.smoke_script = args.smoke_script.resolve()
         if not args.smoke_script.is_file() or not os.access(args.smoke_script, os.X_OK):

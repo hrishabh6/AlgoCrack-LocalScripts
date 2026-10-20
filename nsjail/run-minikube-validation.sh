@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=nsjail/lib/constants.sh
-source "${ROOT}/nsjail/lib/constants.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/constants.sh
+source "${SCRIPT_DIR}/lib/constants.sh"
 
-OUT="${NSJAIL_MINIKUBE_VALIDATION_OUT:-${ROOT}/../context/phase1/minikube-validation.jsonl}"
+OUT="${NSJAIL_MINIKUBE_VALIDATION_OUT:-${SCRIPTS_ROOT}/../context/phase1/minikube-validation.jsonl}"
 mkdir -p "$(dirname "${OUT}")"
 : >"${OUT}"
 
-"${ROOT}/verify-minikube-nsjail-seccomp.sh"
+"${SCRIPT_DIR}/verify-minikube-seccomp.sh"
 
 record() {
   printf '{"case":%s,"status":%s,"detail":%s}\n' \

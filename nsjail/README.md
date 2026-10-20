@@ -2,18 +2,18 @@
 
 Pinned versions and hashes live in `lib/constants.sh`.
 
-| Script | Purpose |
-| --- | --- |
-| `build-nsjail-from-docker.sh` | Build `algocrack/nsjail-spike:3.6` and extract host `nsjail` + runtime libs into `scripts/.local/` |
-| `run-native-fixture.sh` | Single-fixture NsJail invocation on the host (Ubuntu OpenJDK 21 layout) |
-| `run-native-validation.sh` | Java/security fixture matrix → `context/phase1/native-validation.jsonl` |
-| `run-minikube-validation.sh` | Canary Pod matrix → `context/phase1/minikube-validation.jsonl` |
-| `capture-host-state.sh` | Kernel/userns/cgroup snapshot |
+- `check-prerequisites.sh` — fail-fast native diagnostic.
+- `build-nsjail-from-docker.sh` — build `algocrack/nsjail-spike:3.6` and
+  extract host `nsjail` plus runtime libraries into `scripts/.local/`.
+- `run-native-fixture.sh` — run one NsJail fixture on the host.
+- `run-native-validation.sh` — run the Java/security fixture matrix.
+- `install-minikube-seccomp.sh` — copy the pinned outer profile to the
+  Minikube kubelet.
+- `verify-minikube-seccomp.sh` — verify the profile hash and Hello canary.
+- `run-minikube-validation.sh` — run the Minikube canary matrix.
+- `capture-host-state.sh` — capture kernel, user-namespace, and cgroup state.
 
-Parent repo scripts:
-
-- `../check-nsjail-prerequisites.sh` — fail-fast diagnostic
-- `../install-minikube-nsjail-seccomp.sh` — copy pinned outer profile to kubelet
-- `../verify-minikube-nsjail-seccomp.sh` — hash check + Hello canary
+Compatibility wrappers for the three previously documented root entrypoints
+remain in the parent `scripts/` directory.
 
 Experiment fixtures and manifests: `../experiments/nsjail/`.

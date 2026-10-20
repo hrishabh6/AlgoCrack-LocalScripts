@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-exec python3 "$SCRIPT_DIR/waf_rules.py" "$@"
+exec "${SCRIPT_DIR}/deployment/apply-secrules.sh" "$@"
