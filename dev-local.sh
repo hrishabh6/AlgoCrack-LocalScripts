@@ -943,7 +943,7 @@ stop_unmanaged_frontend() {
 }
 
 dev_local_env_stamp() {
-  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s playground_backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s cxe_backend=%s runner=%s v2=%s v2_prefix=%s nsjail=%s workspace=%s quarantine=%s' \
+  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s playground_backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s cxe_backend=%s runner=%s runner_id=%s v2=%s v2_prefix=%s nsjail=%s nsjail_lib=%s workspace=%s quarantine=%s runner_home=%s lease=%s heartbeat=%s output_limit=%s' \
     "$DEV_LOCAL_PLAYGROUND" \
     "$PLAYGROUND_API_ENABLED" \
     "$PLAYGROUND_RUN_ENABLED" \
@@ -956,11 +956,17 @@ dev_local_env_stamp() {
     "$COMPLEXITY_DYNAMIC_PROFILING_ENABLED" \
     "$DEV_LOCAL_CXE_BACKEND" \
     "$DEV_LOCAL_CXE_RUNNER" \
+    "$CXE_RUNNER_ID" \
     "$EXECUTION_V2_ENABLED" \
     "$CXE_V2_KEY_PREFIX" \
     "$CXE_NSJAIL_BIN" \
+    "$CXE_NSJAIL_LIB_DIR" \
     "$CXE_RUNNER_WORKSPACE_ROOT" \
-    "$CXE_RUNNER_QUARANTINE_ROOT"
+    "$CXE_RUNNER_QUARANTINE_ROOT" \
+    "$CXE_RUNNER_HOME" \
+    "$CXE_RUNNER_LEASE_SECONDS" \
+    "$CXE_RUNNER_HEARTBEAT_SECONDS" \
+    "$CXE_RUNNER_MAX_OUTPUT_BYTES"
 }
 
 write_dev_local_env_stamp() {
