@@ -117,6 +117,22 @@ DEV_LOCAL_PLAYGROUND="${DEV_LOCAL_PLAYGROUND:-true}"
 # Complexity analysis is enabled locally as static analysis only. Dynamic profiling
 # remains off because it requires the production-style benchmark/profile services.
 DEV_LOCAL_COMPLEXITY="${DEV_LOCAL_COMPLEXITY:-true}"
+# Ordinary Run/Submit/oracle use the persistent NsJail runner locally by default.
+# The legacy local-process path remains an explicit trusted-development rollback.
+DEV_LOCAL_CXE_BACKEND="${DEV_LOCAL_CXE_BACKEND:-persistent-nsjail}"
+DEV_LOCAL_CXE_RUNNER="${DEV_LOCAL_CXE_RUNNER:-true}"
+CXE_NSJAIL_BIN="${CXE_NSJAIL_BIN:-$ROOT/scripts/.local/bin/nsjail}"
+CXE_NSJAIL_LIB_DIR="${CXE_NSJAIL_LIB_DIR:-$ROOT/scripts/.local/lib}"
+CXE_RUNNER_ID="${CXE_RUNNER_ID:-dev-local-runner}"
+CXE_V2_KEY_PREFIX="${CXE_V2_KEY_PREFIX:-execution:v2:dev-local:}"
+CXE_RUNNER_WORKSPACE_ROOT="${CXE_RUNNER_WORKSPACE_ROOT:-$ROOT/.dev-cxe-workspaces}"
+CXE_RUNNER_QUARANTINE_ROOT="${CXE_RUNNER_QUARANTINE_ROOT:-$ROOT/.dev-cxe-quarantine}"
+CXE_RUNNER_HOME="${CXE_RUNNER_HOME:-$ROOT/.dev-cxe-runner-home}"
+CXE_RUNNER_READY_TIMEOUT_SECONDS="${CXE_RUNNER_READY_TIMEOUT_SECONDS:-30}"
+CXE_RUNNER_LEASE_SECONDS="${CXE_RUNNER_LEASE_SECONDS:-60}"
+CXE_RUNNER_HEARTBEAT_SECONDS="${CXE_RUNNER_HEARTBEAT_SECONDS:-5}"
+CXE_RUNNER_BLOCK_TIMEOUT_SECONDS="${CXE_RUNNER_BLOCK_TIMEOUT_SECONDS:-2}"
+CXE_RUNNER_MAX_OUTPUT_BYTES="${CXE_RUNNER_MAX_OUTPUT_BYTES:-262144}"
 
 if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
   PLAYGROUND_API_ENABLED=true
@@ -141,6 +157,41 @@ else
   COMPLEXITY_STATIC_ANALYSIS_ENABLED=false
   COMPLEXITY_DYNAMIC_PROFILING_ENABLED=false
 fi
+
+case "$DEV_LOCAL_CXE_BACKEND" in
+  persistent-nsjail)
+    EXECUTION_V2_ENABLED=true
+    EXECUTION_V2_REAPER_ENABLED=true
+    EXECUTION_PERSISTENT_RUNNER_ENABLED=true
+    EXECUTION_SUBMISSION_BACKEND=PERSISTENT_NSJAIL
+    if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
+      EXECUTION_WORKER_BOOTSTRAP_ENABLED=true
+      CXE_ORCHESTRATOR_WORKER_COUNT=1
+    else
+      EXECUTION_WORKER_BOOTSTRAP_ENABLED=false
+      CXE_ORCHESTRATOR_WORKER_COUNT=0
+    fi
+    ;;
+  legacy-local-process)
+    EXECUTION_V2_ENABLED=false
+    EXECUTION_V2_REAPER_ENABLED=false
+    EXECUTION_PERSISTENT_RUNNER_ENABLED=false
+    EXECUTION_SUBMISSION_BACKEND=LEGACY_QUEUE
+    EXECUTION_WORKER_BOOTSTRAP_ENABLED=true
+    CXE_ORCHESTRATOR_WORKER_COUNT="$WORKER_COUNT"
+    ;;
+  *)
+    cat >&2 <<EOF
+Unsupported DEV_LOCAL_CXE_BACKEND: $DEV_LOCAL_CXE_BACKEND
+Supported native backends:
+  persistent-nsjail    isolated default for Run, Submit, and oracle
+  legacy-local-process trusted-development rollback only
+EOF
+    exit 1
+    ;;
+esac
+
+[[ "$CXE_V2_KEY_PREFIX" == *: ]] || CXE_V2_KEY_PREFIX="${CXE_V2_KEY_PREFIX}:"
 
 is_google_oauth_placeholder() {
   case "${1:-}" in
@@ -196,6 +247,12 @@ export DEV_LOCAL_PLAYGROUND PLAYGROUND_API_ENABLED PLAYGROUND_RUN_ENABLED
 export EXECUTION_PLAYGROUND_ENABLED EXECUTION_PLAYGROUND_SANDBOX_BACKEND NEXT_PUBLIC_PLAYGROUND_ENABLED
 export DEV_LOCAL_COMPLEXITY COMPLEXITY_API_ENABLED COMPLEXITY_STATIC_ANALYSIS_ENABLED
 export COMPLEXITY_DYNAMIC_PROFILING_ENABLED
+export DEV_LOCAL_CXE_BACKEND DEV_LOCAL_CXE_RUNNER CXE_NSJAIL_BIN CXE_NSJAIL_LIB_DIR
+export CXE_RUNNER_ID CXE_V2_KEY_PREFIX CXE_RUNNER_WORKSPACE_ROOT CXE_RUNNER_QUARANTINE_ROOT CXE_RUNNER_HOME
+export CXE_RUNNER_READY_TIMEOUT_SECONDS CXE_RUNNER_LEASE_SECONDS CXE_RUNNER_HEARTBEAT_SECONDS
+export CXE_RUNNER_BLOCK_TIMEOUT_SECONDS CXE_RUNNER_MAX_OUTPUT_BYTES
+export EXECUTION_V2_ENABLED EXECUTION_V2_REAPER_ENABLED EXECUTION_PERSISTENT_RUNNER_ENABLED
+export EXECUTION_SUBMISSION_BACKEND EXECUTION_WORKER_BOOTSTRAP_ENABLED CXE_ORCHESTRATOR_WORKER_COUNT
 
 usage() {
   cat <<'EOF'
@@ -216,6 +273,12 @@ Usage:
   - Disable: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up
   - If playground-related env changed, `up` restarts submission-service, CXE, and frontend once.
 
+  Native CXE execution:
+  - `persistent-nsjail` is the default for ordinary Run, Submit, and oracle.
+  - The runner is a separate plain-Java process with concurrency one.
+  - Missing NsJail/user-namespace prerequisites fail before services start.
+  - Trusted rollback: DEV_LOCAL_CXE_BACKEND=legacy-local-process scripts/dev-local.sh restart
+
 This runs the app like a traditional IDE setup: local MySQL/Redis must already be
 running, while each microservice and the Next.js app run as separate live dev
 processes. No Docker containers are started or stopped by this script.
@@ -230,6 +293,7 @@ Environment:
     Set DEV_LOCAL_PLAYGROUND=false to disable API/run/UI for local processes.
   - Complexity analysis is enabled by default as static analysis only.
     Set DEV_LOCAL_COMPLEXITY=false to disable its API and worker locally.
+  - Set DEV_LOCAL_CXE_RUNNER=false only with the legacy-local-process backend.
 EOF
 }
 
@@ -286,10 +350,43 @@ wait_for_redis() {
   done
 }
 
+validate_cxe_runner_directory() {
+  local label="$1"
+  local path="$2"
+  local resolved
+
+  resolved="$(realpath -m -- "$path")"
+  if [[ "$resolved" != "$ROOT"/.dev-cxe-* || "$resolved" == "$ROOT" ]]; then
+    echo "$label must resolve beneath $ROOT using a .dev-cxe-* directory: $resolved" >&2
+    return 1
+  fi
+}
+
+validate_cxe_runner_config() {
+  [[ "$DEV_LOCAL_CXE_BACKEND" == "persistent-nsjail" ]] || return 0
+
+  if [[ "$DEV_LOCAL_CXE_RUNNER" != "true" ]]; then
+    echo "DEV_LOCAL_CXE_RUNNER must be true when DEV_LOCAL_CXE_BACKEND=persistent-nsjail." >&2
+    return 1
+  fi
+  if (( CXE_RUNNER_HEARTBEAT_SECONDS >= CXE_RUNNER_LEASE_SECONDS )); then
+    echo "CXE_RUNNER_HEARTBEAT_SECONDS must be less than CXE_RUNNER_LEASE_SECONDS." >&2
+    return 1
+  fi
+
+  validate_cxe_runner_directory CXE_RUNNER_WORKSPACE_ROOT "$CXE_RUNNER_WORKSPACE_ROOT"
+  validate_cxe_runner_directory CXE_RUNNER_QUARANTINE_ROOT "$CXE_RUNNER_QUARANTINE_ROOT"
+  validate_cxe_runner_directory CXE_RUNNER_HOME "$CXE_RUNNER_HOME"
+  if [[ "$(realpath -m -- "$CXE_RUNNER_WORKSPACE_ROOT")" == "$(realpath -m -- "$CXE_RUNNER_QUARANTINE_ROOT")" ]]; then
+    echo "CXE runner workspace and quarantine roots must be different." >&2
+    return 1
+  fi
+}
+
 check_prerequisites() {
   local missing=0
 
-  for command_name in mysql mysqladmin redis-cli npm ss; do
+  for command_name in mysql mysqladmin redis-cli npm realpath ss; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       echo "Missing required command: $command_name" >&2
       missing=1
@@ -302,6 +399,14 @@ Missing Java 21.
 Install a JDK 21 distribution or set JAVA_HOME to a JDK 21 directory before running local services.
 EOF
     missing=1
+  fi
+
+  if [[ "$DEV_LOCAL_CXE_BACKEND" == "persistent-nsjail" ]]; then
+    validate_cxe_runner_config || missing=1
+    if ! NSJAIL_BIN="$CXE_NSJAIL_BIN" "$ROOT/scripts/nsjail/check-prerequisites.sh"; then
+      echo "Native NsJail prerequisites failed. No application service was started." >&2
+      missing=1
+    fi
   fi
 
   [[ "$missing" -eq 0 ]]
@@ -713,6 +818,94 @@ EOF
   echo "If Grafana was already open, refresh the browser after it restarts so the data source picker reloads."
 }
 
+cxe_runner_install_dir() {
+  printf '%s' "$ROOT/CodeExecutionEngine/nsjail-runner/build/install/nsjail-runner"
+}
+
+cxe_runner_heartbeat_key() {
+  printf '%srunner:%s:heartbeat' "$CXE_V2_KEY_PREFIX" "$CXE_RUNNER_ID"
+}
+
+prepare_cxe_runner() {
+  local install_dir
+  install_dir="$(cxe_runner_install_dir)"
+
+  mkdir -p \
+    "$CXE_RUNNER_WORKSPACE_ROOT" \
+    "$CXE_RUNNER_QUARANTINE_ROOT" \
+    "$CXE_RUNNER_HOME"
+  chmod 700 \
+    "$CXE_RUNNER_WORKSPACE_ROOT" \
+    "$CXE_RUNNER_QUARANTINE_ROOT" \
+    "$CXE_RUNNER_HOME"
+
+  echo "Building the plain-Java NsJail runner distribution..."
+  (
+    cd "$ROOT/CodeExecutionEngine"
+    ./gradlew --no-daemon :nsjail-runner:installDist
+  )
+
+  if [[ ! -x "$install_dir/bin/nsjail-runner" ]]; then
+    echo "Runner distribution is missing: $install_dir/bin/nsjail-runner" >&2
+    return 1
+  fi
+}
+
+start_cxe_runner() {
+  local install_dir
+  install_dir="$(cxe_runner_install_dir)"
+
+  if ! is_managed_process_running cxe-nsjail-runner; then
+    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" DEL "$(cxe_runner_heartbeat_key)" >/dev/null
+  fi
+
+  # The runner receives an explicit allowlist. Database, OAuth, JWT, Grafana,
+  # and other application secrets exported by this launcher are not inherited.
+  start_bg cxe-nsjail-runner "$ROOT/CodeExecutionEngine" env -i \
+    PATH="$PATH" \
+    JAVA_HOME="$JAVA_HOME" \
+    HOME="$CXE_RUNNER_HOME" \
+    LANG="${LANG:-C.UTF-8}" \
+    LD_LIBRARY_PATH="$CXE_NSJAIL_LIB_DIR" \
+    CXE_RUNNER_ID="$CXE_RUNNER_ID" \
+    CXE_REDIS_HOST="$REDIS_HOST" \
+    CXE_REDIS_PORT="$REDIS_PORT" \
+    CXE_V2_KEY_PREFIX="$CXE_V2_KEY_PREFIX" \
+    CXE_RUNNER_WORKSPACE_ROOT="$CXE_RUNNER_WORKSPACE_ROOT" \
+    CXE_RUNNER_QUARANTINE_ROOT="$CXE_RUNNER_QUARANTINE_ROOT" \
+    CXE_RUNNER_BLOCK_TIMEOUT_SECONDS="$CXE_RUNNER_BLOCK_TIMEOUT_SECONDS" \
+    CXE_RUNNER_LEASE_SECONDS="$CXE_RUNNER_LEASE_SECONDS" \
+    CXE_RUNNER_HEARTBEAT_SECONDS="$CXE_RUNNER_HEARTBEAT_SECONDS" \
+    CXE_RUNNER_MAX_OUTPUT_BYTES="$CXE_RUNNER_MAX_OUTPUT_BYTES" \
+    CXE_NSJAIL_BIN="$CXE_NSJAIL_BIN" \
+    EXECUTION_EXTRA_CLASSPATH="$install_dir/lib/*" \
+    "$install_dir/bin/nsjail-runner"
+}
+
+wait_for_cxe_runner() {
+  local deadline=$((SECONDS + CXE_RUNNER_READY_TIMEOUT_SECONDS))
+  local heartbeat_key
+  heartbeat_key="$(cxe_runner_heartbeat_key)"
+
+  echo "Waiting for the persistent NsJail runner..."
+  while (( SECONDS < deadline )); do
+    if ! is_managed_process_running cxe-nsjail-runner; then
+      echo "Persistent NsJail runner exited during startup. See $LOG_DIR/cxe-nsjail-runner.log" >&2
+      tail -n 40 "$LOG_DIR/cxe-nsjail-runner.log" >&2 || true
+      return 1
+    fi
+    if [[ "$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" --raw GET "$heartbeat_key" 2>/dev/null || true)" == "READY" ]]; then
+      echo "Persistent NsJail runner is ready."
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Persistent NsJail runner did not publish readiness within ${CXE_RUNNER_READY_TIMEOUT_SECONDS}s." >&2
+  tail -n 40 "$LOG_DIR/cxe-nsjail-runner.log" >&2 || true
+  return 1
+}
+
 start_bg() {
   local name="$1"
   local cwd="$2"
@@ -749,8 +942,8 @@ stop_unmanaged_frontend() {
   fi
 }
 
-playground_local_env_stamp() {
-  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s' \
+dev_local_env_stamp() {
+  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s playground_backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s cxe_backend=%s runner=%s v2=%s v2_prefix=%s nsjail=%s workspace=%s quarantine=%s' \
     "$DEV_LOCAL_PLAYGROUND" \
     "$PLAYGROUND_API_ENABLED" \
     "$PLAYGROUND_RUN_ENABLED" \
@@ -760,31 +953,34 @@ playground_local_env_stamp() {
     "$DEV_LOCAL_COMPLEXITY" \
     "$COMPLEXITY_API_ENABLED" \
     "$COMPLEXITY_STATIC_ANALYSIS_ENABLED" \
-    "$COMPLEXITY_DYNAMIC_PROFILING_ENABLED"
+    "$COMPLEXITY_DYNAMIC_PROFILING_ENABLED" \
+    "$DEV_LOCAL_CXE_BACKEND" \
+    "$DEV_LOCAL_CXE_RUNNER" \
+    "$EXECUTION_V2_ENABLED" \
+    "$CXE_V2_KEY_PREFIX" \
+    "$CXE_NSJAIL_BIN" \
+    "$CXE_RUNNER_WORKSPACE_ROOT" \
+    "$CXE_RUNNER_QUARANTINE_ROOT"
 }
 
-write_playground_local_env_stamp() {
-  playground_local_env_stamp >"$PID_DIR/playground-local-env.stamp"
+write_dev_local_env_stamp() {
+  dev_local_env_stamp >"$PID_DIR/dev-local-env.stamp"
 }
 
-# Playground flags are read at process start (Spring @ConditionalOnProperty, Next.js env).
-restart_playground_dependent_services_if_needed() {
-  local stamp_file="$PID_DIR/playground-local-env.stamp"
+# Feature flags and runner routing are read at process start.
+restart_dependent_services_if_needed() {
+  local stamp_file="$PID_DIR/dev-local-env.stamp"
   local current
-  current="$(playground_local_env_stamp)"
+  current="$(dev_local_env_stamp)"
 
   if [[ -f "$stamp_file" ]] && [[ "$(cat "$stamp_file")" == "$current" ]]; then
     return 0
   fi
 
   local name
-  for name in submission-service code-execution-engine frontend; do
+  for name in cxe-nsjail-runner submission-service code-execution-engine frontend; do
     if is_managed_process_running "$name"; then
-      if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
-        echo "Restarting $name for playground local config (local-process; not production sandbox)..."
-      else
-        echo "Restarting $name (playground disabled: DEV_LOCAL_PLAYGROUND=false)..."
-      fi
+      echo "Restarting $name for updated local feature/backend configuration..."
       stop_bg "$name"
     fi
   done
@@ -797,10 +993,26 @@ stop_bg() {
   if [[ -f "$pid_file" ]]; then
     local pid
     pid="$(cat "$pid_file")"
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
-      sleep 1
-      kill -9 "$pid" >/dev/null 2>&1 || true
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      local session_id
+      session_id="$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+      if [[ "$session_id" == "$pid" ]]; then
+        kill -TERM -- "-$pid" >/dev/null 2>&1 || true
+      else
+        kill -TERM "$pid" >/dev/null 2>&1 || true
+      fi
+
+      local deadline=$((SECONDS + 10))
+      while kill -0 "$pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
+        sleep 1
+      done
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        if [[ "$session_id" == "$pid" ]]; then
+          kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+        else
+          kill -KILL "$pid" >/dev/null 2>&1 || true
+        fi
+      fi
     fi
     rm -f "$pid_file"
   fi
@@ -816,7 +1028,13 @@ up() {
   ensure_mysql_databases
   wait_for_redis
   seed_problem_data_if_empty
-  restart_playground_dependent_services_if_needed
+  restart_dependent_services_if_needed
+
+  if [[ "$DEV_LOCAL_CXE_BACKEND" == "persistent-nsjail" ]]; then
+    prepare_cxe_runner
+    start_cxe_runner
+    wait_for_cxe_runner
+  fi
 
   # A reused Gradle daemon retains its original environment. Use a fresh process so
   # each bootRun receives the current local service and feature-flag configuration.
@@ -853,7 +1071,8 @@ up() {
     PROBLEM_SERVICE_URL=http://localhost:8084 \
     EXECUTION_BACKEND=local-process \
     EXECUTION_MODE=worker \
-    WORKER_COUNT="$WORKER_COUNT" \
+    WORKER_COUNT="$CXE_ORCHESTRATOR_WORKER_COUNT" \
+    EXECUTION_WORKER_BOOTSTRAP_ENABLED="$EXECUTION_WORKER_BOOTSTRAP_ENABLED" \
     EXECUTION_WORKER_QUEUE_CAPACITY="$EXECUTION_WORKER_QUEUE_CAPACITY" \
     EXECUTION_TIMEOUT_SECONDS="$EXECUTION_TIMEOUT_SECONDS" \
     EXECUTION_POLL_TIMEOUT_SECONDS="$EXECUTION_POLL_TIMEOUT_SECONDS" \
@@ -861,6 +1080,12 @@ up() {
     EXECUTION_COMPILATION_TIMEOUT_SECONDS="$EXECUTION_COMPILATION_TIMEOUT_SECONDS" \
     EXECUTION_PLAYGROUND_ENABLED="$EXECUTION_PLAYGROUND_ENABLED" \
     EXECUTION_PLAYGROUND_SANDBOX_BACKEND="$EXECUTION_PLAYGROUND_SANDBOX_BACKEND" \
+    EXECUTION_V2_ENABLED="$EXECUTION_V2_ENABLED" \
+    EXECUTION_V2_KEY_PREFIX="$CXE_V2_KEY_PREFIX" \
+    EXECUTION_V2_REAPER_ENABLED="$EXECUTION_V2_REAPER_ENABLED" \
+    EXECUTION_V2_REAPER_INTERVAL_SECONDS=2 \
+    EXECUTION_PERSISTENT_RUNNER_ENABLED="$EXECUTION_PERSISTENT_RUNNER_ENABLED" \
+    EXECUTION_ROUTING_MODE_BACKENDS_SUBMISSION="$EXECUTION_SUBMISSION_BACKEND" \
     ./gradlew --no-daemon bootRun
 
   start_bg submission-service "$ROOT/AlgoCrack-SubmissionService" env \
@@ -896,7 +1121,7 @@ up() {
     npm run dev
 
   start_observability
-  write_playground_local_env_stamp
+  write_dev_local_env_stamp
 
   cat <<EOF
 
@@ -905,6 +1130,8 @@ $( [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]] && printf '\nPlayground: ON (local-pr
 $( [[ "$DEV_LOCAL_PLAYGROUND" != "true" ]] && printf '\nPlayground: OFF (DEV_LOCAL_PLAYGROUND=false).\n' )
 $( [[ "$DEV_LOCAL_COMPLEXITY" == "true" ]] && printf '\nComplexity analysis: ON (static analysis only; dynamic profiling is disabled locally).\n' )
 $( [[ "$DEV_LOCAL_COMPLEXITY" != "true" ]] && printf '\nComplexity analysis: OFF (DEV_LOCAL_COMPLEXITY=false).\n' )
+$( [[ "$DEV_LOCAL_CXE_BACKEND" == "persistent-nsjail" ]] && printf '\nNative CXE: persistent NsJail runner (ordinary Run, Submit, and oracle).\n' )
+$( [[ "$DEV_LOCAL_CXE_BACKEND" == "legacy-local-process" ]] && printf '\nNative CXE: legacy local-process rollback (trusted development only).\n' )
 
 Open:
   Frontend:      http://localhost:3000
@@ -917,6 +1144,8 @@ Open:
 
 Logs:
   scripts/dev-local.sh logs
+  scripts/dev-local.sh logs cxe-nsjail-runner
+  scripts/dev-local.sh logs code-execution-engine
   scripts/dev-local.sh logs problem-service
   scripts/dev-local.sh logs prometheus
   scripts/dev-local.sh logs loki
@@ -938,6 +1167,7 @@ down() {
   stop_bg frontend
   stop_bg api-gateway
   stop_bg submission-service
+  stop_bg cxe-nsjail-runner
   stop_bg code-execution-engine
   stop_bg problem-service
   stop_bg auth-service
@@ -947,8 +1177,9 @@ down() {
 
 status() {
   google_oauth_status
+  echo "Native CXE backend: $DEV_LOCAL_CXE_BACKEND"
 
-  for name in auth-service problem-service code-execution-engine submission-service api-gateway frontend prometheus loki alloy grafana; do
+  for name in auth-service problem-service code-execution-engine cxe-nsjail-runner submission-service api-gateway frontend prometheus loki alloy grafana; do
     local pid_file="$PID_DIR/$name.pid"
     if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" >/dev/null 2>&1; then
       echo "$name: running (pid $(cat "$pid_file"))"
@@ -956,12 +1187,22 @@ status() {
       echo "$name: stopped"
     fi
   done
+
+  if [[ "$DEV_LOCAL_CXE_BACKEND" == "persistent-nsjail" ]]; then
+    local heartbeat
+    heartbeat="$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" --raw GET "$(cxe_runner_heartbeat_key)" 2>/dev/null || true)"
+    echo "cxe-nsjail-runner heartbeat: ${heartbeat:-missing}"
+  fi
 }
 
 logs() {
   local service="${1:-}"
 
   if [[ -n "$service" ]]; then
+    if [[ ! -f "$LOG_DIR/$service.log" ]]; then
+      echo "No log file for service '$service': $LOG_DIR/$service.log" >&2
+      return 1
+    fi
     tail -f "$LOG_DIR/$service.log"
   else
     tail -f "$LOG_DIR"/*.log

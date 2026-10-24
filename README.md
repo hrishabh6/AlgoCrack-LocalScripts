@@ -80,14 +80,55 @@ Opt out:
 DEV_LOCAL_PLAYGROUND=false scripts/dev-local.sh up
 ```
 
-If you change playground-related env while services are already running, `up`
-restarts submission-service, code-execution-engine, and frontend once so flags
-take effect (see `.dev-pids/playground-local-env.stamp`).
+If you change playground or CXE backend configuration while services are
+already running, `up` restarts the affected runner, submission, CXE, and
+frontend processes once so flags take effect (see
+`.dev-pids/dev-local-env.stamp`).
+
+### Native CXE runner (Phase 4)
+
+On supported Linux hosts, `scripts/dev-local.sh up` uses the persistent NsJail
+runner for ordinary Java Run, official Submit, and oracle execution. It builds
+the plain-Java runner distribution, starts it as a separate managed process,
+waits for its Redis heartbeat, and then starts the rest of the local stack.
+This path does not require Docker or Kubernetes. Playground remains on its
+existing local development backend.
+
+The launcher fails before starting application services if NsJail, Java 21, or
+unprivileged user namespaces are unavailable. It never falls back from a
+failed NsJail setup to unsandboxed execution. Install the pinned local NsJail
+artifact first when needed:
+
+```bash
+scripts/nsjail/build-nsjail-from-docker.sh
+scripts/nsjail/check-prerequisites.sh
+scripts/dev-local.sh up
+scripts/dev-local.sh status
+scripts/dev-local.sh logs cxe-nsjail-runner
+```
+
+Runner workspaces, quarantine, and its task-local home default to narrowly
+scoped `.dev-cxe-*` directories under the project root. `down` terminates the
+runner process group before CXE shutdown; it does not stop MySQL or Redis.
+
+The legacy local-process backend remains an explicit trusted-development
+compatibility mode:
+
+```bash
+DEV_LOCAL_CXE_BACKEND=legacy-local-process scripts/dev-local.sh restart
+```
+
+Use that setting intentionally; missing or failed NsJail prerequisites never
+select it automatically. Relevant overrides are `CXE_NSJAIL_BIN`,
+`CXE_NSJAIL_LIB_DIR`, `CXE_V2_KEY_PREFIX`, `CXE_RUNNER_WORKSPACE_ROOT`, and
+`CXE_RUNNER_QUARANTINE_ROOT`.
 
 
 ### CXE NsJail prerequisites (Phase 1)
 
-Read-only gate and Minikube seccomp provisioning for the persistent NsJail runner path. Does **not** change `dev-local.sh` routing or Helm releases.
+Read-only gate and Minikube seccomp provisioning for the persistent NsJail
+runner path. Phase 4 uses the native prerequisite gate; these tools do not
+change Helm releases.
 
 ```bash
 # Native gate (never enables local-process fallback)
