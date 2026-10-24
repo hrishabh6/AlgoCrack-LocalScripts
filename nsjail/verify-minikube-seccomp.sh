@@ -26,10 +26,14 @@ docker build \
   -t "${NSJAIL_SPIKE_IMAGE}" \
   "${NSJAIL_EXPERIMENT_DIR}"
 
-if ! minikube image ls 2>/dev/null | grep -q "nsjail-spike:3.6"; then
-  echo "Loading ${NSJAIL_SPIKE_IMAGE} into minikube..."
-  minikube image load "${NSJAIL_SPIKE_IMAGE}"
-fi
+echo "Loading ${NSJAIL_SPIKE_IMAGE} into minikube..."
+minikube image load "${NSJAIL_SPIKE_IMAGE}"
+
+# A Never-restart canary remains in a terminal state after an earlier run. Apply
+# does not recreate that Pod, so replace only this disposable canary before its
+# readiness check. The namespace and all application workloads are preserved.
+kubectl -n "${NSJAIL_SPIKE_NAMESPACE}" delete pod nsjail-spike \
+  --ignore-not-found --wait=true
 
 kubectl apply -f "${NSJAIL_CANARY_MANIFEST}"
 
