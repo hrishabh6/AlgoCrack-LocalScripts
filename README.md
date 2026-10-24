@@ -69,7 +69,7 @@ are machine-local runtime state and are intentionally ignored by Git.
 
 Playground is **on by default** when you run `scripts/dev-local.sh up`. The
 launcher sets `PLAYGROUND_API_ENABLED`, `PLAYGROUND_RUN_ENABLED`,
-`EXECUTION_PLAYGROUND_ENABLED`, and `NEXT_PUBLIC_PLAYGROUND_ENABLED` to `true`
+`EXECUTION_PLAYGROUND_ENABLED`, and `PLAYGROUND_UI_ENABLED` to `true`
 and uses CXE sandbox backend `local-process` (trusted development only — not a
 production or hostile-code sandbox). Production `application.yml` defaults and
 the Kubernetes `production-verified` gate are unchanged.

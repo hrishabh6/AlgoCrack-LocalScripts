@@ -139,12 +139,12 @@ if [[ "$DEV_LOCAL_PLAYGROUND" == "true" ]]; then
   PLAYGROUND_RUN_ENABLED=true
   EXECUTION_PLAYGROUND_ENABLED=true
   EXECUTION_PLAYGROUND_SANDBOX_BACKEND=local-process
-  NEXT_PUBLIC_PLAYGROUND_ENABLED=true
+  PLAYGROUND_UI_ENABLED=true
 else
   PLAYGROUND_API_ENABLED=false
   PLAYGROUND_RUN_ENABLED=false
   EXECUTION_PLAYGROUND_ENABLED=false
-  NEXT_PUBLIC_PLAYGROUND_ENABLED=false
+  PLAYGROUND_UI_ENABLED=false
   EXECUTION_PLAYGROUND_SANDBOX_BACKEND="${EXECUTION_PLAYGROUND_SANDBOX_BACKEND:-local-process}"
 fi
 
@@ -244,7 +244,7 @@ export EXECUTION_POLL_TIMEOUT_SECONDS EXECUTION_MEMORY_SOFT_LIMIT_MB EXECUTION_C
 export API_GATEWAY_PORT NEXT_PUBLIC_API_BASE_URL DEV_LOCAL_OBSERVABILITY PROMETHEUS_PORT LOKI_PORT GRAFANA_PORT
 export GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD
 export DEV_LOCAL_PLAYGROUND PLAYGROUND_API_ENABLED PLAYGROUND_RUN_ENABLED
-export EXECUTION_PLAYGROUND_ENABLED EXECUTION_PLAYGROUND_SANDBOX_BACKEND NEXT_PUBLIC_PLAYGROUND_ENABLED
+export EXECUTION_PLAYGROUND_ENABLED EXECUTION_PLAYGROUND_SANDBOX_BACKEND PLAYGROUND_UI_ENABLED
 export DEV_LOCAL_COMPLEXITY COMPLEXITY_API_ENABLED COMPLEXITY_STATIC_ANALYSIS_ENABLED
 export COMPLEXITY_DYNAMIC_PROFILING_ENABLED
 export DEV_LOCAL_CXE_BACKEND DEV_LOCAL_CXE_RUNNER CXE_NSJAIL_BIN CXE_NSJAIL_LIB_DIR
@@ -269,7 +269,7 @@ Usage:
 
   Playground (local dev):
   - Enabled by default on `up` (local-process CXE backend; trusted dev only — not a hostile-code sandbox).
-  - Sets PLAYGROUND_* / EXECUTION_PLAYGROUND_* / NEXT_PUBLIC_PLAYGROUND_ENABLED for the launcher.
+  - Sets PLAYGROUND_* / EXECUTION_PLAYGROUND_* / PLAYGROUND_UI_ENABLED for the launcher.
   - Disable: DEV_LOCAL_PLAYGROUND=false ./scripts/dev-local.sh up
   - If playground-related env changed, `up` restarts submission-service, CXE, and frontend once.
 
@@ -943,12 +943,12 @@ stop_unmanaged_frontend() {
 }
 
 dev_local_env_stamp() {
-  printf 'dev_local_playground=%s api=%s run=%s cxe=%s next=%s playground_backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s cxe_backend=%s runner=%s runner_id=%s v2=%s v2_prefix=%s nsjail=%s nsjail_lib=%s workspace=%s quarantine=%s runner_home=%s lease=%s heartbeat=%s output_limit=%s' \
+  printf 'dev_local_playground=%s api=%s run=%s cxe=%s playground_ui=%s playground_backend=%s complexity=%s complexity_api=%s complexity_static=%s complexity_dynamic=%s cxe_backend=%s runner=%s runner_id=%s v2=%s v2_prefix=%s nsjail=%s nsjail_lib=%s workspace=%s quarantine=%s runner_home=%s lease=%s heartbeat=%s output_limit=%s' \
     "$DEV_LOCAL_PLAYGROUND" \
     "$PLAYGROUND_API_ENABLED" \
     "$PLAYGROUND_RUN_ENABLED" \
     "$EXECUTION_PLAYGROUND_ENABLED" \
-    "$NEXT_PUBLIC_PLAYGROUND_ENABLED" \
+    "$PLAYGROUND_UI_ENABLED" \
     "$EXECUTION_PLAYGROUND_SANDBOX_BACKEND" \
     "$DEV_LOCAL_COMPLEXITY" \
     "$COMPLEXITY_API_ENABLED" \
@@ -1122,7 +1122,7 @@ up() {
 
   start_bg frontend "$ROOT/frontend" env \
     NEXT_PUBLIC_API_BASE_URL="$NEXT_PUBLIC_API_BASE_URL" \
-    NEXT_PUBLIC_PLAYGROUND_ENABLED="$NEXT_PUBLIC_PLAYGROUND_ENABLED" \
+    PLAYGROUND_UI_ENABLED="$PLAYGROUND_UI_ENABLED" \
     PORT=3000 \
     npm run dev
 
