@@ -164,44 +164,69 @@ scripts/maintenance/cleanup-merged-branches.sh
 
 ### Docker RC Image Build & Push
 
-Use `scripts/deployment/release-images.sh` to build, push, resume, and verify all seven AlgoCrack Docker images (Gateway, Auth, Problem, Submission, CXE, Frontend, and WAF) on Docker Hub.
+Use `scripts/deployment/release-images.sh` to build, push, resume, and verify all **eight** AlgoCrack Docker images on Docker Hub:
 
-**Prerequisites:** Docker, Buildx, Git, curl, and Docker Hub authentication.
+| Image | Git source | Notes |
+|---|---|---|
+| `api-gateway` | AlgoCrack-APIGateway | Standard service image |
+| `auth-service` | AlgoCrack-AuthService | Standard service image |
+| `problem-service` | AlgoCrack-ProblemService | Standard service image |
+| `submission-service` | AlgoCrack-SubmissionService | Standard service image |
+| `code-execution-engine` | CodeExecutionEngine | CXE orchestrator (`Dockerfile`) |
+| `cxe-nsjail-runner` | CodeExecutionEngine | Persistent runner (`Dockerfile.runner.packaged`, workspace context) |
+| `frontend` | frontend | Standard service image |
+| `waf` | docker | CRS edge image (`docker/waf`) |
+
+Both CXE images record the **same** `CodeExecutionEngine` commit SHA. The runner build runs `:nsjail-runner:installDist` on the host and requires `scripts/.local/bin/nsjail` (Phase 1 native build).
+
+**Prerequisites:** Docker, Buildx, Git, curl, Docker Hub authentication, host NsJail binary for runner publishes.
 
 ```bash
 # Authenticate with Docker Hub
 docker login -u hrishabhjoshi
 
-# Preview builds without publishing
-./scripts/deployment/release-images.sh v1.0.0-rc.2 --dry-run
+# Preview builds without publishing (includes runner Gradle + Dockerfile path)
+./scripts/deployment/release-images.sh v1.0.0-rc.8 --dry-run
 
-# Build, push, and verify all images
-./scripts/deployment/release-images.sh v1.0.0-rc.2
+# Build, push, and verify all eight images
+./scripts/deployment/release-images.sh v1.0.0-rc.8 --yes
 
-# Resume an interrupted release (skip already-published images)
-./scripts/deployment/release-images.sh v1.0.0-rc.2 --resume
+# Resume an interrupted release (skip already-published tags)
+./scripts/deployment/release-images.sh v1.0.0-rc.8 --resume --yes
 
-# Resume and push without immediate digest verification
-./scripts/deployment/release-images.sh v1.0.0-rc.2 --resume --skip-verification
+# Resume without immediate digest verification
+./scripts/deployment/release-images.sh v1.0.0-rc.8 --resume --skip-verification --yes
 
-# Verify all seven published images separately
-./scripts/deployment/release-images.sh v1.0.0-rc.2 --verify
-
-# Skip interactive confirmation
-./scripts/deployment/release-images.sh v1.0.0-rc.2 --yes
+# Verify all eight published images separately (uses manifest SHAs when present)
+./scripts/deployment/release-images.sh v1.0.0-rc.8 --verify
 ```
 
+**Manifest:** `release-manifests/<tag>/images.tsv` columns:
+
+`component`, `image`, `git_repository`, `git_sha`, `platform`, `manifest_digest`, `status`, `dockerfile`, `build_context`, `artifact_role`
+
 **Script features:**
-- Validates clean Git repositories on `main`.
-- Builds images sequentially for `linux/amd64`.
-- Prevents overwriting existing Docker Hub tags.
-- Supports resuming partially completed releases using `--resume`.
-- Supports publishing without immediate verification using `--skip-verification`.
-- Verifies all published images using `--verify`, without rebuilding.
-- Generates a release manifest at `release-manifests/<tag>/images.tsv`.
+- Validates clean Git repositories on `main` (CodeExecutionEngine checked once, used for orchestrator + runner).
+- Builds sequentially for `linux/amd64` with immutable-tag preflight (HTTP 404 only → build).
+- `--resume` skips remote tags that already exist; preserves manifest SHAs/digests for published rows.
+- `--verify` inspects all eight remote digests; fails on digest drift vs a prior manifest.
 - Does not modify Git branches or deploy Kubernetes.
 
-**Note:** Use `--resume` if publishing was interrupted. Use a new RC tag when rebuilding or changing images; never overwrite an existing published RC. If verification is skipped, run `--verify` before Kubernetes deployment.
+**Helm alignment:** Chart image keys `images.codeExecutionEngine` and `nsjailRunner.image` map to `code-execution-engine:<tag>` and `cxe-nsjail-runner:<tag>`. RC overlays may add SHA-suffixed aliases (for example `v1.0.0-rc.8-cxe-c8e9c06`) for Minikube `pullPolicy: Never`; the release script publishes the canonical shared tag `v1.0.0-rc.N` on Docker Hub.
+
+**Troubleshooting:**
+- `Missing scripts/.local/bin/nsjail` — build/install Phase 1 NsJail before publishing the runner.
+- `Gradle :nsjail-runner:installDist failed` — fix CXE runner module locally, then retry with `--resume`.
+- `already exists; use --resume` — never overwrite a published RC tag; bump `rc.N` or resume.
+- `Digest CHANGED` on `--verify` — tag was replaced upstream; treat as release incident, publish a new RC tag.
+
+**Offline tests:**
+
+```bash
+bash scripts/deployment/tests/test_release_images.sh
+```
+
+**Note:** Use `--resume` after partial publishes. If verification was skipped, run `--verify` before Helm upgrade. Load images into Minikube (or pull after publish) before applying RC overlays with `pullPolicy: Never`.
 
 ### WAF and Kubernetes verification
 

@@ -7,30 +7,35 @@ usage() {
   cat <<'EOF'
 Usage: scripts/deployment/release-images.sh <vX.Y.Z-rc.N> [OPTIONS]
 
-Default: build/push all seven AlgoCrack images, checking tags are absent first.
+Default: build/push all eight AlgoCrack images, checking tags are absent first.
+
+Images: api-gateway, auth-service, problem-service, submission-service,
+code-execution-engine, cxe-nsjail-runner, frontend, waf.
 
 Options:
   --resume             Skip published images; build/push missing images. Preserve
                        original source SHAs for published images in the manifest.
   --skip-verification  Do not inspect digests after pushing (tag-existence checks
                        still run, to prevent overwriting published RC tags).
-  --verify             Verification ONLY: check ALL seven remote image digests.
+  --verify             Verification ONLY: check ALL eight remote image digests.
                        No builds, pushes, or tag-existence preflight.
   --dry-run            Print planned actions without network/build/push.
   --yes                Do not prompt before building and pushing.
   -h, --help           Show help.
 
 Examples:
-  ./scripts/deployment/release-images.sh v1.0.0-rc.2 --resume --skip-verification
-  ./scripts/deployment/release-images.sh v1.0.0-rc.2 --verify
-  ./scripts/deployment/release-images.sh v1.0.0-rc.3 --dry-run
+  ./scripts/deployment/release-images.sh v1.0.0-rc.8 --dry-run
+  ./scripts/deployment/release-images.sh v1.0.0-rc.8 --resume --skip-verification
+  ./scripts/deployment/release-images.sh v1.0.0-rc.8 --verify
 
 Environment:
   DOCKER_HUB_NAMESPACE   Default: hrishabhjoshi
   RELEASE_PLATFORM       Default: linux/amd64
   RELEASE_OUTPUT_DIR     Default: <workspace>/release-manifests
+  NSJAIL_VERSION         Runner build-arg (default: 3.6)
 
 Requires Docker/Buildx, Git, curl for publishing; Docker/Buildx for --verify.
+The persistent runner requires scripts/.local/bin/nsjail (Phase 1 build).
 Log in to Docker Hub before publishing. Published RC tags are never replaced.
 No Git push/merge, Kubernetes deployment, or local service shutdown.
 EOF
@@ -65,22 +70,26 @@ if (( VERIFY_ONLY && (RESUME || SKIP_VERIFICATION || DRY_RUN) )); then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
+ROOT="${ALGOCRACK_WORKSPACE_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd -P)}"
+ROOT="$(cd -- "$ROOT" && pwd -P)"
 NAMESPACE="${DOCKER_HUB_NAMESPACE:-hrishabhjoshi}"
 PLATFORM="${RELEASE_PLATFORM:-linux/amd64}"
 OUTPUT_BASE="${RELEASE_OUTPUT_DIR:-$ROOT/release-manifests}"
+NSJAIL_VERSION="${NSJAIL_VERSION:-3.6}"
+IMAGE_COUNT=8
 [[ "$NAMESPACE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo 'ERROR: Invalid Docker Hub namespace' >&2; exit 2; }
 [[ "$PLATFORM" =~ ^linux/(amd64|arm64)$ ]] || { echo 'ERROR: Unsupported platform' >&2; exit 2; }
 
-# Image repo | Git repository | Build context relative to workspace | Dockerfile
+# name | git repo | context (relative to workspace) | dockerfile (relative) | profile
 IMAGE_CONFIG=(
-  'api-gateway|AlgoCrack-APIGateway|AlgoCrack-APIGateway|AlgoCrack-APIGateway/Dockerfile'
-  'auth-service|AlgoCrack-AuthService|AlgoCrack-AuthService|AlgoCrack-AuthService/Dockerfile'
-  'problem-service|AlgoCrack-ProblemService|AlgoCrack-ProblemService|AlgoCrack-ProblemService/Dockerfile'
-  'submission-service|AlgoCrack-SubmissionService|AlgoCrack-SubmissionService|AlgoCrack-SubmissionService/Dockerfile'
-  'code-execution-engine|CodeExecutionEngine|CodeExecutionEngine|CodeExecutionEngine/Dockerfile'
-  'frontend|frontend|frontend|frontend/Dockerfile'
-  'waf|docker|docker/waf|docker/waf/Dockerfile'
+  'api-gateway|AlgoCrack-APIGateway|AlgoCrack-APIGateway|AlgoCrack-APIGateway/Dockerfile|standard|gateway'
+  'auth-service|AlgoCrack-AuthService|AlgoCrack-AuthService|AlgoCrack-AuthService/Dockerfile|standard|auth'
+  'problem-service|AlgoCrack-ProblemService|AlgoCrack-ProblemService|AlgoCrack-ProblemService/Dockerfile|standard|problem'
+  'submission-service|AlgoCrack-SubmissionService|AlgoCrack-SubmissionService|AlgoCrack-SubmissionService/Dockerfile|standard|submission'
+  'code-execution-engine|CodeExecutionEngine|CodeExecutionEngine|CodeExecutionEngine/Dockerfile|standard|cxe-orchestrator'
+  'cxe-nsjail-runner|CodeExecutionEngine|.|CodeExecutionEngine/Dockerfile.runner.packaged|runner|cxe-persistent-runner'
+  'frontend|frontend|frontend|frontend/Dockerfile|standard|frontend'
+  'waf|docker|docker/waf|docker/waf/Dockerfile|standard|waf'
 )
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -98,60 +107,85 @@ fi
 OUT="$OUTPUT_BASE/$TAG"
 TSV="$OUT/images.tsv"
 declare -a IMAGES=() REPOS=() CONTEXTS=() DOCKERFILES=() SHAS=() REMOTE_EXISTS=()
+declare -a PROFILES=() ARTIFACTS=() DOCKERFILE_RELP=() CONTEXT_RELP=()
 declare -A OLD_SHA=() OLD_DIGEST=() OLD_STATUS=() DIGESTS=() STATUSES=()
+declare -A CHECKED_REPOS=()
 
-# A previous attempt may have left only a header (older script behavior).
-# Read original digests and source revisions before modifying the manifest.
+read_manifest_row() {
+  component="$1" image="$2" repo="$3" sha="$4" platform="$5" digest="$6" status="$7"
+  dockerfile="${8:-}" build_context="${9:-}" artifact="${10:-}"
+  [[ "$component" == component || -z "$component" ]] && return 0
+  [[ "$component" =~ ^[a-z0-9-]+$ ]] || fail "Corrupt manifest row: $component"
+  [[ -z "${OLD_SHA[$component]+x}" ]] || fail "Duplicate manifest entry: $component"
+  OLD_SHA["$component"]="$sha"
+  OLD_DIGEST["$component"]="$digest"
+  OLD_STATUS["$component"]="${status:-UNKNOWN}"
+}
+
 if [[ -f "$TSV" ]]; then
-  while IFS=$'\t' read -r component image repo sha platform digest status _extra; do
-    [[ "$component" == component || -z "$component" ]] && continue
-    [[ "$component" =~ ^[a-z0-9-]+$ ]] || fail "Corrupt manifest row: $component"
-    [[ -z "${OLD_SHA[$component]+x}" ]] || fail "Duplicate manifest entry: $component"
-    OLD_SHA["$component"]="$sha"
-    OLD_DIGEST["$component"]="$digest"
-    OLD_STATUS["$component"]="${status:-UNKNOWN}"
-  done < "$TSV"
+  header="$(head -n 1 "$TSV")"
+  if [[ "$header" == *$'\t''artifact_role' ]]; then
+    while IFS=$'\t' read -r component image repo sha platform digest status dockerfile build_context artifact _extra; do
+      read_manifest_row "$component" "$image" "$repo" "$sha" "$platform" "$digest" "$status" \
+        "$dockerfile" "$build_context" "$artifact"
+    done < <(tail -n +2 "$TSV")
+  else
+    while IFS=$'\t' read -r component image repo sha platform digest status _extra; do
+      read_manifest_row "$component" "$image" "$repo" "$sha" "$platform" "$digest" "$status"
+    done < "$TSV"
+  fi
 fi
 
-# --verify deliberately does not depend on the current Git checkout; its
-# provenance comes from a previously recorded manifest, if there is one.
+ensure_repo_clean_main() {
+  local repo="$1"
+  if [[ -n "${CHECKED_REPOS[$repo]+x}" ]]; then
+    return 0
+  fi
+  git -C "$ROOT/$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Not a Git repo: $repo"
+  branch="$(git -C "$ROOT/$repo" symbolic-ref --quiet --short HEAD || true)"
+  [[ "$branch" == main ]] || fail "$repo is on '$branch', expected main."
+  [[ -z "$(git -C "$ROOT/$repo" status --porcelain --untracked-files=normal)" ]] \
+    || fail "$repo has uncommitted/untracked files."
+  CHECKED_REPOS["$repo"]=1
+}
+
 for entry in "${IMAGE_CONFIG[@]}"; do
-  IFS='|' read -r name repo context dockerfile <<< "$entry"
+  IFS='|' read -r name repo context dockerfile profile artifact <<< "$entry"
   sha='UNKNOWN'
   if (( ! VERIFY_ONLY )); then
     [[ -f "$ROOT/$dockerfile" ]] || fail "Missing Dockerfile: $dockerfile"
-    [[ -d "$ROOT/$context" ]] || fail "Missing build context: $context"
-    git -C "$ROOT/$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Not a Git repo: $repo"
-    branch="$(git -C "$ROOT/$repo" symbolic-ref --quiet --short HEAD || true)"
-    [[ "$branch" == main ]] || fail "$repo is on '$branch', expected main."
-    [[ -z "$(git -C "$ROOT/$repo" status --porcelain --untracked-files=normal)" ]] || fail "$repo has uncommitted/untracked files."
+    [[ -d "$ROOT/$context" || "$context" == . ]] || fail "Missing build context: $context"
+    ensure_repo_clean_main "$repo"
     sha="$(git -C "$ROOT/$repo" rev-parse HEAD)"
   elif [[ -n "${OLD_SHA[$name]:-}" ]]; then
     sha="${OLD_SHA[$name]}"
   fi
   IMAGES+=("$name") REPOS+=("$repo")
-  CONTEXTS+=("$ROOT/$context") DOCKERFILES+=("$ROOT/$dockerfile") SHAS+=("$sha")
+  CONTEXTS+=("$ROOT/$context") DOCKERFILES+=("$ROOT/$dockerfile")
+  DOCKERFILE_RELP+=("$dockerfile") CONTEXT_RELP+=("$context")
+  PROFILES+=("$profile") ARTIFACTS+=("$artifact") SHAS+=("$sha")
   DIGESTS["$name"]="${OLD_DIGEST[$name]:--}"
   STATUSES["$name"]="${OLD_STATUS[$name]:-PENDING}"
 done
+
+(( ${#IMAGES[@]} == IMAGE_COUNT )) || fail "Internal error: expected $IMAGE_COUNT images, got ${#IMAGES[@]}"
 
 write_manifest() {
   mkdir -p -- "$OUT"
   local tmp="$OUT/.images.tsv.$$.tmp" i name
   {
-    printf 'component\timage\tgit_repository\tgit_sha\tplatform\tmanifest_digest\tstatus\n'
+    printf 'component\timage\tgit_repository\tgit_sha\tplatform\tmanifest_digest\tstatus\tdockerfile\tbuild_context\tartifact_role\n'
     for i in "${!IMAGES[@]}"; do
       name="${IMAGES[i]}"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$NAMESPACE/$name:$TAG" "${REPOS[i]}" "${SHAS[i]}" "$PLATFORM" \
-        "${DIGESTS[$name]}" "${STATUSES[$name]}"
+        "${DIGESTS[$name]}" "${STATUSES[$name]}" "${DOCKERFILE_RELP[i]}" "${CONTEXT_RELP[i]}" \
+        "${ARTIFACTS[i]}"
     done
   } > "$tmp"
   mv -- "$tmp" "$TSV"
 }
 
-# The Digest: line is the registry's top-level manifest/index digest (not a
-# per-platform child digest). Inspect errors are retried, including 502s.
 INSPECT_DIGEST=''
 inspect_digest() {
   local ref="$1" attempt output value
@@ -173,7 +207,6 @@ inspect_digest() {
   return 1
 }
 
-# Never silently accept a re-tagged image when a digest was recorded earlier.
 record_verified() {
   local name="$1" digest="$2" previous="${DIGESTS[$1]}"
   if [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ && "$previous" != "$digest" ]]; then
@@ -187,17 +220,83 @@ record_verified() {
   write_manifest
 }
 
-printf 'Workspace: %s\nRelease:   %s\nNamespace: %s\nPlatform:  %s\n\n' \
-  "$ROOT" "$TAG" "$NAMESPACE" "$PLATFORM"
+prepare_runner_artifacts() {
+  local nsjail_bin="$ROOT/scripts/.local/bin/nsjail"
+  [[ -x "$nsjail_bin" ]] || fail "Missing $nsjail_bin; build Phase 1 NsJail before publishing the runner."
+  echo 'Preparing cxe-nsjail-runner: Gradle :nsjail-runner:installDist...'
+  (cd "$ROOT/CodeExecutionEngine" && ./gradlew :nsjail-runner:installDist -x test --no-daemon) \
+    || fail 'Gradle :nsjail-runner:installDist failed.'
+}
+
+build_push_image() {
+  local i="$1" ref="$2"
+  if [[ "${PROFILES[i]}" == runner ]]; then
+    prepare_runner_artifacts
+    local vcs_short
+    vcs_short="$(git -C "$ROOT/CodeExecutionEngine" rev-parse --short HEAD)"
+    local build_date
+    build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    docker buildx build --platform "$PLATFORM" --pull \
+      --file "${DOCKERFILES[i]}" --tag "$ref" \
+      --build-arg "NSJAIL_VERSION=${NSJAIL_VERSION}" \
+      --build-arg "VCS_REF=${vcs_short}" \
+      --build-arg "BUILD_DATE=${build_date}" \
+      --label "org.opencontainers.image.revision=${SHAS[i]}" \
+      --label "org.opencontainers.image.version=$TAG" \
+      --label "xyz.hrishabhjoshi.cxe.artifact=${ARTIFACTS[i]}" \
+      --push "${CONTEXTS[i]}"
+  else
+    docker buildx build --platform "$PLATFORM" --pull \
+      --file "${DOCKERFILES[i]}" --tag "$ref" \
+      --label "org.opencontainers.image.revision=${SHAS[i]}" \
+      --label "org.opencontainers.image.version=$TAG" \
+      --label "xyz.hrishabhjoshi.cxe.artifact=${ARTIFACTS[i]}" \
+      --push "${CONTEXTS[i]}"
+  fi
+}
+
+print_dry_run_plan() {
+  local i ref
+  for i in "${!IMAGES[@]}"; do
+    ref="$NAMESPACE/${IMAGES[i]}:$TAG"
+    if [[ "${PROFILES[i]}" == runner ]]; then
+      printf '  ./gradlew -p CodeExecutionEngine :nsjail-runner:installDist -x test\n'
+      printf '  require executable: scripts/.local/bin/nsjail\n'
+    fi
+    printf '  '
+    if [[ "${PROFILES[i]}" == runner ]]; then
+      printf '%q ' docker buildx build --platform "$PLATFORM" --pull \
+        --file "${DOCKERFILES[i]}" --tag "$ref" \
+        --build-arg "NSJAIL_VERSION=${NSJAIL_VERSION}" \
+        --build-arg 'VCS_REF=<CodeExecutionEngine short HEAD>' \
+        --build-arg 'BUILD_DATE=<utc timestamp>' \
+        --label "org.opencontainers.image.revision=${SHAS[i]}" \
+        --label "org.opencontainers.image.version=$TAG" \
+        --push "${CONTEXTS[i]}"
+    else
+      printf '%q ' docker buildx build --platform "$PLATFORM" --pull \
+        --file "${DOCKERFILES[i]}" --tag "$ref" \
+        --label "org.opencontainers.image.revision=${SHAS[i]}" \
+        --label "org.opencontainers.image.version=$TAG" \
+        --push "${CONTEXTS[i]}"
+    fi
+    printf '\n'
+  done
+}
+
+printf 'Workspace: %s\nRelease:   %s\nNamespace: %s\nPlatform:  %s\nImages:    %d\n\n' \
+  "$ROOT" "$TAG" "$NAMESPACE" "$PLATFORM" "$IMAGE_COUNT"
 for i in "${!IMAGES[@]}"; do
   printf '%-22s %s:%s' "${IMAGES[i]}" "$NAMESPACE/${IMAGES[i]}" "$TAG"
-  if (( ! VERIFY_ONLY )); then printf '  (%s @ %.12s)' "${REPOS[i]}" "${SHAS[i]}"; fi
+  if (( ! VERIFY_ONLY )); then
+    printf '  (%s @ %.12s, %s)' "${REPOS[i]}" "${SHAS[i]}" "${ARTIFACTS[i]}"
+  fi
   printf '\n'
 done
 printf '\n'
 
 if (( VERIFY_ONLY )); then
-  echo 'VERIFY ONLY: inspecting all seven published images (no builds/pushes).'
+  echo "VERIFY ONLY: inspecting all $IMAGE_COUNT published images (no builds/pushes)."
   failed=0
   for i in "${!IMAGES[@]}"; do
     name="${IMAGES[i]}"; ref="$NAMESPACE/$name:$TAG"
@@ -216,31 +315,20 @@ if (( VERIFY_ONLY )); then
     fi
   done
   echo "Manifest: $TSV"
-  (( failed == 0 )) || fail "$failed of ${#IMAGES[@]} image(s) could not be verified."
-  echo 'All seven remote image digests verified. No builds or pushes were performed.'
+  (( failed == 0 )) || fail "$failed of $IMAGE_COUNT image(s) could not be verified."
+  echo "All $IMAGE_COUNT remote image digests verified. No builds or pushes were performed."
   exit 0
 fi
 
 if (( DRY_RUN )); then
   echo 'DRY RUN: no remote checks, builds, pushes, or manifest changes.'
-  for i in "${!IMAGES[@]}"; do
-    ref="$NAMESPACE/${IMAGES[i]}:$TAG"
-    printf '  '
-    printf '%q ' docker buildx build --platform "$PLATFORM" --pull \
-      --file "${DOCKERFILES[i]}" --tag "$ref" \
-      --label "org.opencontainers.image.revision=${SHAS[i]}" \
-      --label "org.opencontainers.image.version=$TAG" \
-      --push "${CONTEXTS[i]}"
-    printf '\n'
-  done
+  print_dry_run_plan
   (( RESUME )) && echo 'With --resume, existing remote tags will be skipped.'
   (( SKIP_VERIFICATION )) && echo 'With --skip-verification, post-push digest inspection is disabled.'
   exit 0
 fi
 
-# Preflight ALL seven before any push. Interpret only HTTP 404 as missing.
-# Other responses fail closed; never treat a registry outage as a missing tag.
-echo 'Checking Docker Hub tags (never overwrite an existing RC tag)...'
+echo "Checking Docker Hub tags (never overwrite an existing RC tag)..."
 missing=0
 for i in "${!IMAGES[@]}"; do
   name="${IMAGES[i]}"
@@ -265,10 +353,6 @@ for i in "${!IMAGES[@]}"; do
   esac
 done
 
-# In resume mode, the registry decides which images are already published.
-# Preserve provenance for published images; use current Git revisions ONLY for
-# images that will actually be built. An old manifest may have captured SHAs
-# for pending images before they were ever published.
 if (( RESUME )); then
   echo 'Reconciling source revisions with remote image state...'
   for i in "${!IMAGES[@]}"; do
@@ -287,8 +371,6 @@ if (( RESUME )); then
         printf '  %-22s published; original source SHA unavailable (not rebuilt)\n' "$name"
       fi
     else
-      # This tag does not exist: old manifest source data is only a plan.
-      # Never preserve a digest or VERIFIED state for a missing remote image.
       if [[ -n "$previous_sha" && "$previous_sha" != UNKNOWN && "$previous_sha" != "$current_sha" ]]; then
         printf '  %-22s pending: updating planned SHA %.12s -> %.12s\n' \
           "$name" "$previous_sha" "$current_sha"
@@ -304,7 +386,7 @@ if (( RESUME )); then
   printf 'Resuming %s: %d image(s) missing, %d already published.\n' \
     "$TAG" "$missing" "$((${#IMAGES[@]}-missing))"
 else
-  echo 'All seven tags are unused.'
+  echo "All $IMAGE_COUNT tags are unused."
 fi
 echo 'IMPORTANT: public tag checks may be inconclusive for PRIVATE repositories.'
 echo 'Enable immutable Docker Hub tags when available; do not reuse RC tags.'
@@ -319,8 +401,6 @@ if (( ! ASSUME_YES && missing > 0 )); then
   [[ "$answer" == PUBLISH ]] || fail 'Cancelled; nothing pushed.'
 fi
 
-# New releases cannot accidentally replace a prior local manifest; resumes can
-# update an interrupted manifest, including one created by the older script.
 if (( ! RESUME )) && [[ -e "$OUT" ]]; then
   fail "Manifest output directory exists: $OUT (use --resume if this is an interrupted attempt)."
 fi
@@ -332,22 +412,18 @@ for i in "${!IMAGES[@]}"; do
   if (( REMOTE_EXISTS[i] )); then
     if (( SKIP_VERIFICATION )); then
       if [[ "${DIGESTS[$name]}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        echo "[ $((i+1))/${#IMAGES[@]} ] SKIPPED (previously recorded digest): $ref"
+        echo "[ $((i+1))/$IMAGE_COUNT ] SKIPPED (previously recorded digest): $ref"
       else
         STATUSES["$name"]='SKIPPED_UNVERIFIED'
         write_manifest
-        echo "[ $((i+1))/${#IMAGES[@]} ] SKIPPED (remote tag exists, digest not checked): $ref"
+        echo "[ $((i+1))/$IMAGE_COUNT ] SKIPPED (remote tag exists, digest not checked): $ref"
       fi
       continue
     fi
-    echo "[$((i+1))/${#IMAGES[@]}] Existing image; verifying: $ref"
+    echo "[$((i+1))/$IMAGE_COUNT] Existing image; verifying: $ref"
   else
-    echo "[$((i+1))/${#IMAGES[@]}] Building and pushing: $ref"
-    docker buildx build --platform "$PLATFORM" --pull \
-      --file "${DOCKERFILES[i]}" --tag "$ref" \
-      --label "org.opencontainers.image.revision=${SHAS[i]}" \
-      --label "org.opencontainers.image.version=$TAG" \
-      --push "${CONTEXTS[i]}" || fail "Build/push failed for $ref; use --resume to recover."
+    echo "[$((i+1))/$IMAGE_COUNT] Building and pushing: $ref"
+    build_push_image "$i" "$ref" || fail "Build/push failed for $ref; use --resume to recover."
     STATUSES["$name"]='PUSHED_UNVERIFIED'
     DIGESTS["$name"]='-'
     write_manifest
@@ -364,8 +440,8 @@ done
 
 printf '\nRelease processing complete: %s\nManifest: %s\n' "$TAG" "$TSV"
 if (( SKIP_VERIFICATION )); then
-  echo 'Some images may be unverified. Run the same tag with --verify to verify ALL seven.'
+  echo "Some images may be unverified. Run the same tag with --verify to verify all $IMAGE_COUNT."
 else
-  echo 'All seven images have verified remote digests.'
+  echo "All $IMAGE_COUNT images have verified remote digests."
 fi
 echo 'No Kubernetes configuration or Git branches were modified.'
